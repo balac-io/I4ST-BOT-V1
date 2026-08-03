@@ -1,0 +1,115 @@
+{
+  "guilds": {
+    "1515142123249471580": {
+      "prefix": "/",
+      "log_channel": null,
+      "welcome_channel": null,
+      "goodbye_channel": null,
+      "welcome_msg": "Bienvenue {user} sur {server} !",
+      "goodbye_msg": "Au revoir {user}.",
+      "autorole": null,
+      "verify_role": null,
+      "antiinvite": false,
+      "antilink": false,
+      "antispam": true,
+      "antibot": false,
+      "antinuke": false,
+      "shop": {},
+      "counters": {}
+    },
+    "1202460874309378098": {
+      "prefix": "/",
+      "log_channel": null,
+      "welcome_channel": null,
+      "goodbye_channel": null,
+      "welcome_msg": "Bienvenue {user} sur {server} !",
+      "goodbye_msg": "Au revoir {user}.",
+      "autorole": null,
+      "verify_role": null,
+      "antiinvite": false,
+      "antilink": false,
+      "antispam": false,
+      "antibot": false,
+      "antinuke": false,
+      "shop": {},
+      "counters": {}
+    },
+    "1449586068599996570": {
+      "prefix": "/",
+      "log_channel": null,
+      "welcome_channel": null,
+      "goodbye_channel": null,
+      "welcome_msg": "Bienvenue {user} sur {server} !",
+      "goodbye_msg": "Au revoir {user}.",
+      "autorole": null,
+      "verify_role": null,
+      "antiinvite": false,
+      "antilink": false,
+      "antispam": false,
+      "antibot": false,
+      "antinuke": false,
+      "shop": {},
+      "counters": {}
+    }
+  },
+  "users": {
+    "1182555622709927962": {
+      "bio": null,
+      "coins": 0,
+      "bank": 0,
+      "xp": 230,
+      "level": 2,
+      "inventory": [],
+      "last_daily": null,
+      "last_work": null,
+      "total_msgs": 46
+    },
+    "1518635110193303612": {
+      "bio": null,
+      "coins": 0,
+      "bank": 0,
+      "xp": 35,
+      "level": 1,
+      "inventory": [],
+      "last_daily": null,
+      "last_work": null,
+      "total_msgs": 7
+    },
+    "1306247285688238123": {
+      "bio": null,
+      "coins": 0,
+      "bank": 0,
+      "xp": 45,
+      "level": 1,
+      "inventory": [],
+      "last_daily": null,
+      "last_work": null,
+      "total_msgs": 9
+    },
+    "1247606476600639602": {
+      "bio": null,
+      "coins": 0,
+      "bank": 0,
+      "xp": 20,
+      "level": 1,
+      "inventory": [],
+      "last_daily": null,
+      "last_work": null,
+      "total_msgs": 4
+    },
+    "1124050513260986388": {
+      "bio": null,
+      "coins": 0,
+      "bank": 0,
+      "xp": 10,
+      "level": 1,
+      "inventory": [],
+      "last_daily": null,
+      "last_work": null,
+      "total_msgs": 2
+    }
+  },
+  "warnings": {},
+  "tickets": {},
+  "backups": {}
+}
