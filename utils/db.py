@@ -1,41 +1,306 @@
 """
-Persistance JSON simple — remplaçable par SQLite/PostgreSQL en prod SaaS.
+Kryvoox Database — SQLite (solide & fiable)
+Remplace l'ancien stockage JSON.
+Les fonctions publiques restent identiques pour ne rien casser.
 """
 
 import json
 import os
+import sqlite3
 from datetime import datetime
+from contextlib import contextmanager
 
-DB_FILE = "data/kryvoox.json"
+DB_PATH = "data/kryvoox.db"
+OLD_JSON = "data/kryvoox.json"
 
-_DEFAULT = {
-    "guilds": {},      # config par serveur
-    "users": {},       # profils, niveaux, économie
-    "warnings": {},    # warnings par serveur/user
-    "tickets": {},     # tickets par serveur
-    "backups": {},     # backups serveur
-}
+# ─── Connexion ────────────────────────────────────────────────────────────────
 
-def _load() -> dict:
+def _get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return _DEFAULT.copy()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
-def _save(data: dict):
-    os.makedirs("data", exist_ok=True)
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+@contextmanager
+def _db():
+    conn = _get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-_db = _load()
+# ─── Initialisation des tables ────────────────────────────────────────────────
 
-# ─── Accès guilds ─────────────────────────────────────────────────────────────
+def _init_tables(conn: sqlite3.Connection):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id     TEXT PRIMARY KEY,
+        bio         TEXT,
+        coins       INTEGER DEFAULT 0,
+        bank        INTEGER DEFAULT 0,
+        xp          INTEGER DEFAULT 0,
+        level       INTEGER DEFAULT 1,
+        inventory   TEXT DEFAULT '[]',
+        last_daily  TEXT,
+        last_work   TEXT,
+        total_msgs  INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS guilds (
+        guild_id        TEXT PRIMARY KEY,
+        prefix          TEXT DEFAULT '/',
+        log_channel     INTEGER,
+        welcome_channel INTEGER,
+        goodbye_channel INTEGER,
+        welcome_msg     TEXT DEFAULT 'Bienvenue {user} sur {server} !',
+        goodbye_msg     TEXT DEFAULT 'Au revoir {user}.',
+        autorole        INTEGER,
+        verify_role     INTEGER,
+        antiinvite      INTEGER DEFAULT 0,
+        antilink        INTEGER DEFAULT 0,
+        antispam        INTEGER DEFAULT 0,
+        antibot         INTEGER DEFAULT 0,
+        antinuke        INTEGER DEFAULT 0,
+        shop            TEXT DEFAULT '{}',
+        counters        TEXT DEFAULT '{}',
+        ticket_category INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS warnings (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id    TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        reason      TEXT,
+        mod         TEXT,
+        date        TEXT,
+        warn_id     INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS tickets (
+        guild_id    TEXT NOT NULL,
+        ticket_id   TEXT NOT NULL,
+        channel_id  INTEGER,
+        user_id     INTEGER,
+        category    TEXT,
+        status      TEXT DEFAULT 'open',
+        PRIMARY KEY (guild_id, ticket_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_warnings_guild_user ON warnings(guild_id, user_id);
+    CREATE INDEX IF NOT EXISTS idx_users_xp ON users(xp DESC);
+    CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins + bank DESC);
+    """)
+
+# ─── Migration depuis l'ancien JSON (une seule fois) ──────────────────────────
+
+def _migrate_from_json(conn: sqlite3.Connection):
+    if not os.path.exists(OLD_JSON):
+        return
+
+    print("📦 Migration des anciennes données JSON → SQLite...")
+    try:
+        with open(OLD_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"⚠️ Impossible de lire l'ancien JSON : {e}")
+        return
+
+    # Users
+    for uid, u in data.get("users", {}).items():
+        conn.execute("""
+            INSERT OR REPLACE INTO users
+            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            str(uid),
+            u.get("bio"),
+            u.get("coins", 0),
+            u.get("bank", 0),
+            u.get("xp", 0),
+            u.get("level", 1),
+            json.dumps(u.get("inventory", [])),
+            u.get("last_daily"),
+            u.get("last_work"),
+            u.get("total_msgs", 0),
+        ))
+
+    # Guilds
+    for gid, g in data.get("guilds", {}).items():
+        conn.execute("""
+            INSERT OR REPLACE INTO guilds
+            (guild_id, prefix, log_channel, welcome_channel, goodbye_channel,
+             welcome_msg, goodbye_msg, autorole, verify_role,
+             antiinvite, antilink, antispam, antibot, antinuke,
+             shop, counters)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            str(gid),
+            g.get("prefix", "/"),
+            g.get("log_channel"),
+            g.get("welcome_channel"),
+            g.get("goodbye_channel"),
+            g.get("welcome_msg", "Bienvenue {user} sur {server} !"),
+            g.get("goodbye_msg", "Au revoir {user}."),
+            g.get("autorole"),
+            g.get("verify_role"),
+            1 if g.get("antiinvite") else 0,
+            1 if g.get("antilink") else 0,
+            1 if g.get("antispam") else 0,
+            1 if g.get("antibot") else 0,
+            1 if g.get("antinuke") else 0,
+            json.dumps(g.get("shop", {})),
+            json.dumps(g.get("counters", {})),
+        ))
+
+    # Warnings
+    for key, warns in data.get("warnings", {}).items():
+        try:
+            gid, uid = key.split(":", 1)
+        except ValueError:
+            continue
+        for w in warns:
+            conn.execute("""
+                INSERT INTO warnings (guild_id, user_id, reason, mod, date, warn_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                str(gid), str(uid),
+                w.get("reason"), w.get("mod"), w.get("date"), w.get("id", 1)
+            ))
+
+    # Tickets
+    for gid, tickets in data.get("tickets", {}).items():
+        for tid, t in tickets.items():
+            conn.execute("""
+                INSERT OR REPLACE INTO tickets
+                (guild_id, ticket_id, channel_id, user_id, category, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                str(gid), str(tid),
+                t.get("channel_id"), t.get("user_id"),
+                t.get("category"), t.get("status", "open")
+            ))
+
+    # On renomme l'ancien fichier pour ne plus le recharger
+    try:
+        os.rename(OLD_JSON, OLD_JSON + ".migrated")
+        print("✅ Migration terminée. Ancien JSON renommé en .migrated")
+    except Exception:
+        print("✅ Migration terminée (JSON non renommé).")
+
+# ─── Boot ─────────────────────────────────────────────────────────────────────
+
+def _boot():
+    with _db() as conn:
+        _init_tables(conn)
+        # Vérifie si la table users est vide → on tente la migration
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count == 0 and os.path.exists(OLD_JSON):
+            _migrate_from_json(conn)
+
+_boot()
+
+# ─── Helpers internes ─────────────────────────────────────────────────────────
+
+def _row_to_user(row: sqlite3.Row) -> dict:
+    if row is None:
+        return None
+    return {
+        "bio": row["bio"],
+        "coins": row["coins"] or 0,
+        "bank": row["bank"] or 0,
+        "xp": row["xp"] or 0,
+        "level": row["level"] or 1,
+        "inventory": json.loads(row["inventory"] or "[]"),
+        "last_daily": row["last_daily"],
+        "last_work": row["last_work"],
+        "total_msgs": row["total_msgs"] or 0,
+    }
+
+def _row_to_guild(row: sqlite3.Row) -> dict:
+    if row is None:
+        return None
+    return {
+        "prefix": row["prefix"] or "/",
+        "log_channel": row["log_channel"],
+        "welcome_channel": row["welcome_channel"],
+        "goodbye_channel": row["goodbye_channel"],
+        "welcome_msg": row["welcome_msg"] or "Bienvenue {user} sur {server} !",
+        "goodbye_msg": row["goodbye_msg"] or "Au revoir {user}.",
+        "autorole": row["autorole"],
+        "verify_role": row["verify_role"],
+        "antiinvite": bool(row["antiinvite"]),
+        "antilink": bool(row["antilink"]),
+        "antispam": bool(row["antispam"]),
+        "antibot": bool(row["antibot"]),
+        "antinuke": bool(row["antinuke"]),
+        "shop": json.loads(row["shop"] or "{}"),
+        "counters": json.loads(row["counters"] or "{}"),
+        "ticket_category": row["ticket_category"],
+    }
+
+# ─── Accès Users (API publique inchangée) ─────────────────────────────────────
+
+def get_user(user_id: int) -> dict:
+    uid = str(user_id)
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (uid,)).fetchone()
+        if row:
+            return _row_to_user(row)
+
+        # Création du profil par défaut
+        default = {
+            "bio": None,
+            "coins": 0,
+            "bank": 0,
+            "xp": 0,
+            "level": 1,
+            "inventory": [],
+            "last_daily": None,
+            "last_work": None,
+            "total_msgs": 0,
+        }
+        conn.execute("""
+            INSERT INTO users (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs)
+            VALUES (?, NULL, 0, 0, 0, 1, '[]', NULL, NULL, 0)
+        """, (uid,))
+        return default
+
+def save_user(user_id: int, data: dict):
+    uid = str(user_id)
+    with _db() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO users
+            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            uid,
+            data.get("bio"),
+            data.get("coins", 0),
+            data.get("bank", 0),
+            data.get("xp", 0),
+            data.get("level", 1),
+            json.dumps(data.get("inventory", [])),
+            data.get("last_daily"),
+            data.get("last_work"),
+            data.get("total_msgs", 0),
+        ))
+
+# ─── Accès Guilds ─────────────────────────────────────────────────────────────
 
 def get_guild(guild_id: int) -> dict:
     gid = str(guild_id)
-    if gid not in _db["guilds"]:
-        _db["guilds"][gid] = {
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM guilds WHERE guild_id = ?", (gid,)).fetchone()
+        if row:
+            return _row_to_guild(row)
+
+        default = {
             "prefix": "/",
             "log_channel": None,
             "welcome_channel": None,
@@ -51,86 +316,149 @@ def get_guild(guild_id: int) -> dict:
             "antinuke": False,
             "shop": {},
             "counters": {},
+            "ticket_category": None,
         }
-        _save(_db)
-    return _db["guilds"][gid]
+        conn.execute("""
+            INSERT INTO guilds
+            (guild_id, prefix, log_channel, welcome_channel, goodbye_channel,
+             welcome_msg, goodbye_msg, autorole, verify_role,
+             antiinvite, antilink, antispam, antibot, antinuke, shop, counters)
+            VALUES (?, '/', NULL, NULL, NULL, ?, ?, NULL, NULL, 0, 0, 0, 0, 0, '{}', '{}')
+        """, (gid, default["welcome_msg"], default["goodbye_msg"]))
+        return default
 
 def save_guild(guild_id: int, data: dict):
-    _db["guilds"][str(guild_id)] = data
-    _save(_db)
-
-# ─── Accès users ──────────────────────────────────────────────────────────────
-
-def get_user(user_id: int) -> dict:
-    uid = str(user_id)
-    if uid not in _db["users"]:
-        _db["users"][uid] = {
-            "bio": None,
-            "coins": 0,
-            "bank": 0,
-            "xp": 0,
-            "level": 1,
-            "inventory": [],
-            "last_daily": None,
-            "last_work": None,
-            "total_msgs": 0,
-        }
-        _save(_db)
-    return _db["users"][uid]
-
-def save_user(user_id: int, data: dict):
-    _db["users"][str(user_id)] = data
-    _save(_db)
+    gid = str(guild_id)
+    with _db() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO guilds
+            (guild_id, prefix, log_channel, welcome_channel, goodbye_channel,
+             welcome_msg, goodbye_msg, autorole, verify_role,
+             antiinvite, antilink, antispam, antibot, antinuke,
+             shop, counters, ticket_category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            gid,
+            data.get("prefix", "/"),
+            data.get("log_channel"),
+            data.get("welcome_channel"),
+            data.get("goodbye_channel"),
+            data.get("welcome_msg", "Bienvenue {user} sur {server} !"),
+            data.get("goodbye_msg", "Au revoir {user}."),
+            data.get("autorole"),
+            data.get("verify_role"),
+            1 if data.get("antiinvite") else 0,
+            1 if data.get("antilink") else 0,
+            1 if data.get("antispam") else 0,
+            1 if data.get("antibot") else 0,
+            1 if data.get("antinuke") else 0,
+            json.dumps(data.get("shop", {})),
+            json.dumps(data.get("counters", {})),
+            data.get("ticket_category"),
+        ))
 
 # ─── Warnings ─────────────────────────────────────────────────────────────────
 
 def add_warning(guild_id: int, user_id: int, reason: str, mod: str) -> int:
-    key = f"{guild_id}:{user_id}"
-    if key not in _db["warnings"]:
-        _db["warnings"][key] = []
-    _db["warnings"][key].append({
-        "reason": reason,
-        "mod": mod,
-        "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "id": len(_db["warnings"][key]) + 1
-    })
-    _save(_db)
-    return len(_db["warnings"][key])
+    with _db() as conn:
+        # Compte actuel pour cet utilisateur
+        count = conn.execute(
+            "SELECT COUNT(*) FROM warnings WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id))
+        ).fetchone()[0]
+        new_id = count + 1
+        conn.execute("""
+            INSERT INTO warnings (guild_id, user_id, reason, mod, date, warn_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(guild_id), str(user_id), reason, mod,
+            datetime.now().strftime("%d/%m/%Y %H:%M"), new_id
+        ))
+        return new_id
 
 def get_warnings(guild_id: int, user_id: int) -> list:
-    return _db["warnings"].get(f"{guild_id}:{user_id}", [])
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT reason, mod, date, warn_id as id FROM warnings WHERE guild_id = ? AND user_id = ? ORDER BY id",
+            (str(guild_id), str(user_id))
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 def clear_warnings(guild_id: int, user_id: int):
-    _db["warnings"].pop(f"{guild_id}:{user_id}", None)
-    _save(_db)
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM warnings WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id))
+        )
 
 # ─── Tickets ──────────────────────────────────────────────────────────────────
 
 def get_tickets(guild_id: int) -> dict:
-    return _db["tickets"].get(str(guild_id), {})
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT ticket_id, channel_id, user_id, category, status FROM tickets WHERE guild_id = ?",
+            (str(guild_id),)
+        ).fetchall()
+        return {
+            r["ticket_id"]: {
+                "channel_id": r["channel_id"],
+                "user_id": r["user_id"],
+                "category": r["category"],
+                "status": r["status"],
+            }
+            for r in rows
+        }
 
 def save_ticket(guild_id: int, ticket_id: str, data: dict):
-    gid = str(guild_id)
-    if gid not in _db["tickets"]:
-        _db["tickets"][gid] = {}
-    _db["tickets"][gid][ticket_id] = data
-    _save(_db)
+    with _db() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO tickets
+            (guild_id, ticket_id, channel_id, user_id, category, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(guild_id), str(ticket_id),
+            data.get("channel_id"), data.get("user_id"),
+            data.get("category"), data.get("status", "open")
+        ))
 
 def delete_ticket(guild_id: int, ticket_id: str):
-    gid = str(guild_id)
-    if gid in _db["tickets"]:
-        _db["tickets"][gid].pop(ticket_id, None)
-        _save(_db)
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM tickets WHERE guild_id = ? AND ticket_id = ?",
+            (str(guild_id), str(ticket_id))
+        )
 
-# ─── Leaderboard ──────────────────────────────────────────────────────────────
+# ─── Leaderboards ─────────────────────────────────────────────────────────────
 
-def get_leaderboard_economy(limit=10) -> list:
-    sorted_u = sorted(_db["users"].items(), key=lambda x: x[1].get("coins", 0) + x[1].get("bank", 0), reverse=True)
-    return sorted_u[:limit]
+def get_leaderboard_economy(limit: int = 10) -> list:
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT user_id, coins, bank, xp, level, total_msgs, bio, inventory, last_daily, last_work
+            FROM users
+            ORDER BY (coins + bank) DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [(r["user_id"], _row_to_user(r)) for r in rows]
 
-def get_leaderboard_xp(limit=10) -> list:
-    sorted_u = sorted(_db["users"].items(), key=lambda x: x[1].get("xp", 0), reverse=True)
-    return sorted_u[:limit]
+def get_leaderboard_xp(limit: int = 10) -> list:
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT user_id, coins, bank, xp, level, total_msgs, bio, inventory, last_daily, last_work
+            FROM users
+            ORDER BY xp DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [(r["user_id"], _row_to_user(r)) for r in rows]
 
 def raw() -> dict:
-    return _db
+    """Pour compatibilité / debug."""
+    with _db() as conn:
+        users = {
+            r["user_id"]: _row_to_user(r)
+            for r in conn.execute("SELECT * FROM users").fetchall()
+        }
+        guilds = {
+            r["guild_id"]: _row_to_guild(r)
+            for r in conn.execute("SELECT * FROM guilds").fetchall()
+        }
+        return {"users": users, "guilds": guilds}
