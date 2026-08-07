@@ -13,7 +13,7 @@ from contextlib import contextmanager
 DB_PATH = "data/kryvoox.db"
 OLD_JSON = "data/kryvoox.json"
 
-# ─── Connexion ────────────────────────────────────────────────────────────────
+# ─── Connexion ────────────────────────────────────────────────────────────
 
 def _get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
@@ -35,7 +35,7 @@ def _db():
     finally:
         conn.close()
 
-# ─── Initialisation des tables ────────────────────────────────────────────────
+# ─── Initialisation des tables ─────────────────────────────────────────────
 
 def _init_tables(conn: sqlite3.Connection):
     conn.executescript("""
@@ -69,7 +69,8 @@ def _init_tables(conn: sqlite3.Connection):
         antinuke        INTEGER DEFAULT 0,
         shop            TEXT DEFAULT '{}',
         counters        TEXT DEFAULT '{}',
-        ticket_category INTEGER
+        ticket_category INTEGER,
+        level_roles     TEXT DEFAULT '{}'
     );
 
     CREATE TABLE IF NOT EXISTS warnings (
@@ -97,7 +98,13 @@ def _init_tables(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins + bank DESC);
     """)
 
-# ─── Migration depuis l'ancien JSON (une seule fois) ──────────────────────────
+    # Migration douce : ajoute la colonne level_roles si elle n'existe pas encore
+    try:
+        conn.execute("ALTER TABLE guilds ADD COLUMN level_roles TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass  # colonne déjà présente
+
+# ─── Migration depuis l'ancien JSON (une seule fois) ─────────────────────────
 
 def _migrate_from_json(conn: sqlite3.Connection):
     if not os.path.exists(OLD_JSON):
@@ -137,8 +144,8 @@ def _migrate_from_json(conn: sqlite3.Connection):
             (guild_id, prefix, log_channel, welcome_channel, goodbye_channel,
              welcome_msg, goodbye_msg, autorole, verify_role,
              antiinvite, antilink, antispam, antibot, antinuke,
-             shop, counters)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             shop, counters, level_roles)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             str(gid),
             g.get("prefix", "/"),
@@ -156,6 +163,7 @@ def _migrate_from_json(conn: sqlite3.Connection):
             1 if g.get("antinuke") else 0,
             json.dumps(g.get("shop", {})),
             json.dumps(g.get("counters", {})),
+            json.dumps(g.get("level_roles", {})),
         ))
 
     # Warnings
@@ -186,26 +194,24 @@ def _migrate_from_json(conn: sqlite3.Connection):
                 t.get("category"), t.get("status", "open")
             ))
 
-    # On renomme l'ancien fichier pour ne plus le recharger
     try:
         os.rename(OLD_JSON, OLD_JSON + ".migrated")
         print("✅ Migration terminée. Ancien JSON renommé en .migrated")
     except Exception:
         print("✅ Migration terminée (JSON non renommé).")
 
-# ─── Boot ─────────────────────────────────────────────────────────────────────
+# ─── Boot ───────────────────────────────────────────────────────────────
 
 def _boot():
     with _db() as conn:
         _init_tables(conn)
-        # Vérifie si la table users est vide → on tente la migration
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0 and os.path.exists(OLD_JSON):
             _migrate_from_json(conn)
 
 _boot()
 
-# ─── Helpers internes ─────────────────────────────────────────────────────────
+# ─── Helpers internes ────────────────────────────────────────────────────
 
 def _row_to_user(row: sqlite3.Row) -> dict:
     if row is None:
@@ -242,9 +248,10 @@ def _row_to_guild(row: sqlite3.Row) -> dict:
         "shop": json.loads(row["shop"] or "{}"),
         "counters": json.loads(row["counters"] or "{}"),
         "ticket_category": row["ticket_category"],
+        "level_roles": json.loads(row["level_roles"] or "{}") if "level_roles" in row.keys() else {},
     }
 
-# ─── Accès Users (API publique inchangée) ─────────────────────────────────────
+# ─── Accès Users (API publique inchangée) ───────────────────────────────────
 
 def get_user(user_id: int) -> dict:
     uid = str(user_id)
@@ -253,7 +260,6 @@ def get_user(user_id: int) -> dict:
         if row:
             return _row_to_user(row)
 
-        # Création du profil par défaut
         default = {
             "bio": None,
             "coins": 0,
@@ -291,7 +297,7 @@ def save_user(user_id: int, data: dict):
             data.get("total_msgs", 0),
         ))
 
-# ─── Accès Guilds ─────────────────────────────────────────────────────────────
+# ─── Accès Guilds ───────────────────────────────────────────────────────
 
 def get_guild(guild_id: int) -> dict:
     gid = str(guild_id)
@@ -317,13 +323,14 @@ def get_guild(guild_id: int) -> dict:
             "shop": {},
             "counters": {},
             "ticket_category": None,
+            "level_roles": {},
         }
         conn.execute("""
             INSERT INTO guilds
             (guild_id, prefix, log_channel, welcome_channel, goodbye_channel,
              welcome_msg, goodbye_msg, autorole, verify_role,
-             antiinvite, antilink, antispam, antibot, antinuke, shop, counters)
-            VALUES (?, '/', NULL, NULL, NULL, ?, ?, NULL, NULL, 0, 0, 0, 0, 0, '{}', '{}')
+             antiinvite, antilink, antispam, antibot, antinuke, shop, counters, level_roles)
+            VALUES (?, '/', NULL, NULL, NULL, ?, ?, NULL, NULL, 0, 0, 0, 0, 0, '{}', '{}', '{}')
         """, (gid, default["welcome_msg"], default["goodbye_msg"]))
         return default
 
@@ -335,8 +342,8 @@ def save_guild(guild_id: int, data: dict):
             (guild_id, prefix, log_channel, welcome_channel, goodbye_channel,
              welcome_msg, goodbye_msg, autorole, verify_role,
              antiinvite, antilink, antispam, antibot, antinuke,
-             shop, counters, ticket_category)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             shop, counters, ticket_category, level_roles)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             gid,
             data.get("prefix", "/"),
@@ -355,13 +362,13 @@ def save_guild(guild_id: int, data: dict):
             json.dumps(data.get("shop", {})),
             json.dumps(data.get("counters", {})),
             data.get("ticket_category"),
+            json.dumps(data.get("level_roles", {})),
         ))
 
-# ─── Warnings ─────────────────────────────────────────────────────────────────
+# ─── Warnings ────────────────────────────────────────────────────────────
 
 def add_warning(guild_id: int, user_id: int, reason: str, mod: str) -> int:
     with _db() as conn:
-        # Compte actuel pour cet utilisateur
         count = conn.execute(
             "SELECT COUNT(*) FROM warnings WHERE guild_id = ? AND user_id = ?",
             (str(guild_id), str(user_id))
@@ -391,7 +398,7 @@ def clear_warnings(guild_id: int, user_id: int):
             (str(guild_id), str(user_id))
         )
 
-# ─── Tickets ──────────────────────────────────────────────────────────────────
+# ─── Tickets ─────────────────────────────────────────────────────────────
 
 def get_tickets(guild_id: int) -> dict:
     with _db() as conn:
@@ -428,7 +435,7 @@ def delete_ticket(guild_id: int, ticket_id: str):
             (str(guild_id), str(ticket_id))
         )
 
-# ─── Leaderboards ─────────────────────────────────────────────────────────────
+# ─── Leaderboards ─────────────────────────────────────────────────────
 
 def get_leaderboard_economy(limit: int = 10) -> list:
     with _db() as conn:
