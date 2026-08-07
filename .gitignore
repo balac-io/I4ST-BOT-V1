@@ -27,6 +27,12 @@ htmlcov/
 .vscode/
 *.iml
 
+# Data (local database)
+data/*.db
+data/*.db-*
+data/*.json.migrated
+data/*.bak
+
 # Divers
 *.log
 logs/
@@ -34,4 +40,3 @@ tmp/
 temp/
 .cache/
 *.bak
-
