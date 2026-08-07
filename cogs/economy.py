@@ -19,11 +19,43 @@ WORK_MESSAGES = [
     "Tu as présenté la météo 🌤️", "Tu as joué de la guitare dans le métro 🎸",
 ]
 
+# ─── Jeux ────────────────────────────────────────────────────────────
+
+SLOTS_EMOJIS = ["🍎", "🍌", "🍊", "🍇", "⭐", "💎", "🍒"]
+SLOTS_MULTIPLIERS = {
+    ("💎", "💎", "💎"): 15,   # jackpot diamants
+    ("⭐", "⭐", "⭐"): 10,         # étoiles
+    ("🍎", "🍎", "🍎"): 5,
+    ("🍌", "🍌", "🍌"): 5,
+    ("🍊", "🍊", "🍊"): 5,
+    ("🍇", "🍇", "🍇"): 5,
+    ("🍒", "🍒", "🍒"): 5,
+}
+
+def _card_value(card: str) -> int:
+    if card in ("J", "Q", "K"):
+        return 10
+    if card == "A":
+        return 11
+    return int(card)
+
+def _hand_value(hand: list[str]) -> int:
+    total = sum(_card_value(c) for c in hand)
+    aces = hand.count("A")
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+def _draw_card() -> str:
+    return random.choice(["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"])
+
+
 class Economy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── /balance ──────────────────────────────────────────────────────────────
+    # ── /balance ───────────────────────────────────────────────────────────
 
     @app_commands.command(name="balance", description="Voir ton solde ou celui d'un membre")
     @app_commands.describe(member="Le membre (optionnel)")
@@ -37,7 +69,7 @@ class Economy(commands.Cog):
         e.add_field(name="💎 Total",        value=f"**{u['coins'] + u['bank']}** 🪙")
         await i.response.send_message(embed=e)
 
-    # ── /daily ────────────────────────────────────────────────────────────────
+    # ── /daily ─────────────────────────────────────────────────────────────
 
     @app_commands.command(name="daily", description="Récompense quotidienne")
     async def daily(self, i: discord.Interaction):
@@ -54,7 +86,7 @@ class Economy(commands.Cog):
             "🎁 Daily Reward"
         ))
 
-    # ── /work ─────────────────────────────────────────────────────────────────
+    # ── /work ──────────────────────────────────────────────────────────────
 
     @app_commands.command(name="work", description="Travaille pour gagner des coins")
     async def work(self, i: discord.Interaction):
@@ -78,7 +110,7 @@ class Economy(commands.Cog):
             "💼 Travail"
         ))
 
-    # ── /pay ──────────────────────────────────────────────────────────────────
+    # ── /pay ───────────────────────────────────────────────────────────────
 
     @app_commands.command(name="pay", description="Envoie des coins à un membre")
     @app_commands.describe(member="Le destinataire", amount="Le montant")
@@ -99,7 +131,7 @@ class Economy(commands.Cog):
             f"{i.user.mention} a envoyé **{amount} coins** 🪙 à {member.mention}."
         ))
 
-    # ── /deposit ──────────────────────────────────────────────────────────────
+    # ── /deposit ──────────────────────────────────────────────────────────
 
     @app_commands.command(name="deposit", description="Dépose des coins en banque")
     @app_commands.describe(amount="Montant (ou 'all')")
@@ -113,7 +145,7 @@ class Economy(commands.Cog):
         db.save_user(i.user.id, u)
         await i.response.send_message(embed=E.success(f"**{n} coins** déposés en banque 🏦\nBanque : **{u['bank']} coins**"))
 
-    # ── /withdraw ─────────────────────────────────────────────────────────────
+    # ── /withdraw ─────────────────────────────────────────────────────────
 
     @app_commands.command(name="withdraw", description="Retire des coins de la banque")
     @app_commands.describe(amount="Montant (ou 'all')")
@@ -127,7 +159,7 @@ class Economy(commands.Cog):
         db.save_user(i.user.id, u)
         await i.response.send_message(embed=E.success(f"**{n} coins** retirés 👛\nPortefeuille : **{u['coins']} coins**"))
 
-    # ── /rob ──────────────────────────────────────────────────────────────────
+    # ── /rob ───────────────────────────────────────────────────────────────
 
     @app_commands.command(name="rob", description="Tente de voler un membre (risqué !)")
     async def rob(self, i: discord.Interaction, member: discord.Member):
@@ -155,7 +187,7 @@ class Economy(commands.Cog):
                 f"Tu t'es fait attraper ! Amende : **{fine} coins** 🪙\nSolde : **{src['coins']} coins**", "🚨 Vol raté"
             ))
 
-    # ── /leaderboard ──────────────────────────────────────────────────────────
+    # ── /leaderboard ──────────────────────────────────────────────────────
 
     @app_commands.command(name="leaderboard", description="Classement des plus riches")
     async def leaderboard(self, i: discord.Interaction):
@@ -167,13 +199,13 @@ class Economy(commands.Cog):
                 u = await self.bot.fetch_user(int(uid))
                 name = u.display_name
             except:
-                name = f"User#{uid[:4]}"
+                name = f"User#{str(uid)[:4]}"
             medal = medals[idx] if idx < 3 else f"`{idx+1}.`"
             total = data.get("coins",0) + data.get("bank",0)
             lines.append(f"{medal} **{name}** — {total} coins 🪙")
         await i.response.send_message(embed=E.base("🏆 Classement — Économie", "\n".join(lines) or "Aucune donnée.", discord.Color.gold()))
 
-    # ── /give ─────────────────────────────────────────────────────────────────
+    # ── /give ──────────────────────────────────────────────────────────────
 
     @app_commands.command(name="give", description="[Admin] Donne des coins à un membre")
     @app_commands.default_permissions(administrator=True)
@@ -185,7 +217,7 @@ class Economy(commands.Cog):
         db.save_user(member.id, u)
         await i.response.send_message(embed=E.success(f"**+{amount} coins** donnés à {member.mention}. Solde : **{u['coins']} coins**"))
 
-    # ── /shop ─────────────────────────────────────────────────────────────────
+    # ── /shop ──────────────────────────────────────────────────────────────
 
     @app_commands.command(name="shop", description="Voir la boutique du serveur")
     async def shop(self, i: discord.Interaction):
@@ -196,7 +228,7 @@ class Economy(commands.Cog):
         lines = [f"**{v['name']}** — `{k}` — {v['price']} coins 🪙\n└ {v['desc']}" for k, v in items.items()]
         await i.response.send_message(embed=E.base("🛒 Boutique", "\n\n".join(lines), discord.Color.blue()))
 
-    # ── /buy ──────────────────────────────────────────────────────────────────
+    # ── /buy ───────────────────────────────────────────────────────────────
 
     @app_commands.command(name="buy", description="Achète un item de la boutique")
     @app_commands.describe(item_id="L'ID de l'item")
@@ -217,7 +249,7 @@ class Economy(commands.Cog):
                 await i.user.add_roles(role)
         await i.response.send_message(embed=E.success(f"Tu as acheté **{item['name']}** pour **{item['price']} coins** 🪙"))
 
-    # ── /sell ─────────────────────────────────────────────────────────────────
+    # ── /sell ──────────────────────────────────────────────────────────────
 
     @app_commands.command(name="sell", description="Vend un item de ton inventaire")
     @app_commands.describe(item_id="L'ID de l'item")
@@ -234,7 +266,7 @@ class Economy(commands.Cog):
         db.save_user(i.user.id, u)
         await i.response.send_message(embed=E.success(f"Item vendu pour **{refund} coins** 🪙 (50% du prix d'achat)."))
 
-    # ── /inventory ────────────────────────────────────────────────────────────
+    # ── /inventory ────────────────────────────────────────────────────────
 
     @app_commands.command(name="inventory", description="Voir ton inventaire")
     async def inventory(self, i: discord.Interaction, member: discord.Member = None):
@@ -249,6 +281,179 @@ class Economy(commands.Cog):
             item = cfg.get("shop", {}).get(iid)
             lines.append(f"• `{iid}` — {item['name'] if item else 'Item inconnu'}")
         await i.response.send_message(embed=E.base(f"🎒 Inventaire — {t.display_name}", "\n".join(lines)))
+
+    # ─── JEUX ─────────────────────────────────────────────────────────────
+
+    # ── /coinflip ────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="coinflip", description="Pile ou face — double ou rien !")
+    @app_commands.describe(amount="Mise (min 10)", choice="pile ou face")
+    @app_commands.choices(choice=[
+        app_commands.Choice(name="Pile", value="pile"),
+        app_commands.Choice(name="Face", value="face"),
+    ])
+    async def coinflip(self, i: discord.Interaction, amount: app_commands.Range[int, 10, 10000], choice: str):
+        u = db.get_user(i.user.id)
+        if u["coins"] < amount:
+            await i.response.send_message(embed=E.error(f"Pas assez de coins. Solde : **{u['coins']}**"), ephemeral=True)
+            return
+
+        result = random.choice(["pile", "face"])
+        won = result == choice
+
+        if won:
+            u["coins"] += amount
+            db.save_user(i.user.id, u)
+            e = E.success(
+                f"La pièce tombe sur **{result.upper()}** !\n"
+                f"Tu gagnes **+{amount} coins** 🪙\n"
+                f"Nouveau solde : **{u['coins']}**",
+                "🪙 Coinflip — Gagné !"
+            )
+        else:
+            u["coins"] -= amount
+            db.save_user(i.user.id, u)
+            e = E.error(
+                f"La pièce tombe sur **{result.upper()}**...\n"
+                f"Tu perds **-{amount} coins**\n"
+                f"Nouveau solde : **{u['coins']}**",
+                "🪙 Coinflip — Perdu"
+            )
+        await i.response.send_message(embed=e)
+
+    # ── /slots ────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="slots", description="Machine à sous — tente le jackpot !")
+    @app_commands.describe(amount="Mise (min 20)")
+    async def slots(self, i: discord.Interaction, amount: app_commands.Range[int, 20, 5000]):
+        u = db.get_user(i.user.id)
+        if u["coins"] < amount:
+            await i.response.send_message(embed=E.error(f"Pas assez de coins. Solde : **{u['coins']}**"), ephemeral=True)
+            return
+
+        reels = [random.choice(SLOTS_EMOJIS) for _ in range(3)]
+        display = " | ".join(reels)
+
+        # Calcul du gain
+        key = tuple(reels)
+        mult = SLOTS_MULTIPLIERS.get(key, 0)
+
+        # 2 identiques = x2
+        if mult == 0:
+            if reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
+                mult = 2
+
+        if mult > 0:
+            win = amount * mult
+            u["coins"] += win
+            db.save_user(i.user.id, u)
+            e = E.success(
+                f"`{display}`\n\n"
+                f"**x{mult}** ! Tu gagnes **+{win} coins** 🪙\n"
+                f"Solde : **{u['coins']}**",
+                "🎰 Slots — Jackpot !" if mult >= 10 else "🎰 Slots — Gagné !"
+            )
+        else:
+            u["coins"] -= amount
+            db.save_user(i.user.id, u)
+            e = E.error(
+                f"`{display}`\n\n"
+                f"Rien... Tu perds **-{amount} coins**\n"
+                f"Solde : **{u['coins']}**",
+                "🎰 Slots — Perdu"
+            )
+        await i.response.send_message(embed=e)
+
+    # ── /blackjack ───────────────────────────────────────────────────────────
+
+    @app_commands.command(name="blackjack", description="Blackjack contre Kryvoox")
+    @app_commands.describe(amount="Mise (min 50)")
+    async def blackjack(self, i: discord.Interaction, amount: app_commands.Range[int, 50, 10000]):
+        u = db.get_user(i.user.id)
+        if u["coins"] < amount:
+            await i.response.send_message(embed=E.error(f"Pas assez de coins. Solde : **{u['coins']}**"), ephemeral=True)
+            return
+
+        # Distribution initiale
+        player = [_draw_card(), _draw_card()]
+        dealer = [_draw_card(), _draw_card()]
+
+        player_val = _hand_value(player)
+        dealer_val = _hand_value(dealer)
+
+        # Blackjack naturel
+        if player_val == 21:
+            if dealer_val == 21:
+                # Égalité
+                e = E.info(
+                    f"**Toi :** {' '.join(player)} (`{player_val}`)\n"
+                    f"**Kryvoox :** {' '.join(dealer)} (`{dealer_val}`)\n\n"
+                    f"Double Blackjack ! Égalité.",
+                    "🃏 Blackjack — Égalité"
+                )
+            else:
+                win = int(amount * 1.5)
+                u["coins"] += win
+                db.save_user(i.user.id, u)
+                e = E.success(
+                    f"**Toi :** {' '.join(player)} (`{player_val}`) → **BLACKJACK !**\n"
+                    f"**Kryvoox :** {' '.join(dealer)} (`{dealer_val}`)\n\n"
+                    f"Tu gagnes **+{win} coins** 🪙\nSolde : **{u['coins']}**",
+                    "🃏 Blackjack !"
+                )
+            await i.response.send_message(embed=e)
+            return
+
+        # Le joueur tire jusqu'à 17+ (stratégie simple auto pour éviter les boutons complexes)
+        while player_val < 17:
+            player.append(_draw_card())
+            player_val = _hand_value(player)
+
+        if player_val > 21:
+            u["coins"] -= amount
+            db.save_user(i.user.id, u)
+            e = E.error(
+                f"**Toi :** {' '.join(player)} (`{player_val}`) → **BUST !**\n"
+                f"**Kryvoox :** {' '.join(dealer)} (`{dealer_val}`)\n\n"
+                f"Tu perds **-{amount} coins**\nSolde : **{u['coins']}**",
+                "🃏 Blackjack — Bust"
+            )
+            await i.response.send_message(embed=e)
+            return
+
+        # Dealer tire jusqu'à 17+
+        while dealer_val < 17:
+            dealer.append(_draw_card())
+            dealer_val = _hand_value(dealer)
+
+        # Résultat
+        if dealer_val > 21 or player_val > dealer_val:
+            u["coins"] += amount
+            db.save_user(i.user.id, u)
+            e = E.success(
+                f"**Toi :** {' '.join(player)} (`{player_val}`)\n"
+                f"**Kryvoox :** {' '.join(dealer)} (`{dealer_val}`)\n\n"
+                f"Tu gagnes **+{amount} coins** 🪙\nSolde : **{u['coins']}**",
+                "🃏 Blackjack — Gagné !"
+            )
+        elif player_val == dealer_val:
+            e = E.info(
+                f"**Toi :** {' '.join(player)} (`{player_val}`)\n"
+                f"**Kryvoox :** {' '.join(dealer)} (`{dealer_val}`)\n\n"
+                f"Égalité ! Mise rendue.",
+                "🃏 Blackjack — Égalité"
+            )
+        else:
+            u["coins"] -= amount
+            db.save_user(i.user.id, u)
+            e = E.error(
+                f"**Toi :** {' '.join(player)} (`{player_val}`)\n"
+                f"**Kryvoox :** {' '.join(dealer)} (`{dealer_val}`)\n\n"
+                f"Tu perds **-{amount} coins**\nSolde : **{u['coins']}**",
+                "🃏 Blackjack — Perdu"
+            )
+
+        await i.response.send_message(embed=e)
 
 
 async def setup(bot):
