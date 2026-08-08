@@ -17,9 +17,10 @@ Tu réponds TOUJOURS en français. Tu es concis et efficace.
 Ne mentionne jamais Groq, Meta ou LLaMA — tu es Kryvoox, point.
 
 Tu as des CAPACITÉS D'ACTION sur le serveur Discord.
-Quand l'utilisateur te demande une action, retourne un JSON à la fin de ta réponse.
+Quand l'utilisateur te demande une action ADMIN (créer un salon, mute, kick, etc.),
+tu peux retourner un JSON à la fin de ta réponse.
 
-FORMAT :
+FORMAT STRICT (uniquement si action nécessaire) :
 ```action
 {"type": "NOM_ACTION", "params": {...}}
 ```
@@ -32,7 +33,7 @@ create_category → {"type": "create_category", "params": {"name": "Nom"}}
 delete_channel → {"type": "delete_channel", "params": {"name": "nom-salon"}}
 create_role → {"type": "create_role", "params": {"name": "Nom Rôle", "color": "#hexcolor", "mentionable": true}}
 delete_role → {"type": "delete_role", "params": {"name": "Nom Rôle"}}
-add_role_to_user → {"type": "add_role_to_user", "params": {"username": "nom#tag ou display name", "role_name": "Nom du rôle"}}
+add_role_to_user → {"type": "add_role_to_user", "params": {"username": "nom", "role_name": "Nom du rôle"}}
 remove_role_from_user → {"type": "remove_role_from_user", "params": {"username": "nom", "role_name": "Nom du rôle"}}
 mute_user → {"type": "mute_user", "params": {"username": "nom", "minutes": 10, "reason": "raison"}}
 unmute_user → {"type": "unmute_user", "params": {"username": "nom"}}
@@ -43,13 +44,47 @@ bulk → {"type": "bulk", "params": {"actions": [action1, action2, ...]}}
 
 RÈGLES IMPORTANTES :
 - N'utilise QUE les types d'action listés ci-dessus. Jamais d'autres.
-- Pour muter un utilisateur via mention, utilise mute_user (pas add_role).
-- Pour kick, utilise kick_user.
-- Pour donner un rôle existant à quelqu'un, utilise add_role_to_user.
+- Pour les conversations normales (blagues, pile ou face, questions, etc.) :
+  NE METS AUCUN JSON, AUCUN BLOC action, AUCUNE ACCOLADE { }.
+  Réponds uniquement en texte propre.
 - Seuls les admins/gestionnaires peuvent déclencher des actions.
 - Pour les actions destructives (kick, ban, delete), confirme dans le texte ce que tu fais.
 - Si tu ne sais pas le nom exact d'un utilisateur, demande-le.
 """
+
+
+def _clean_ai_reply(text: str) -> str:
+    """Supprime tous les blocs JSON / action et les résidus d'accolades."""
+    if not text:
+        return text
+
+    # 1. Bloc ```action ... ```
+    text = re.sub(r"```action\s*[\s\S]*?```", "", text, flags=re.IGNORECASE)
+
+    # 2. Bloc ```json ... ```
+    text = re.sub(r"```json\s*[\s\S]*?```", "", text, flags=re.IGNORECASE)
+
+    # 3. Tout objet JSON qui contient "type" (même multi-lignes / nested)
+    #    On itère plusieurs fois car les regex non-greedy peuvent laisser des restes.
+    for _ in range(5):
+        new_text = re.sub(
+            r"\{\s*[\"']type[\"']\s*:[\s\S]*?\}",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        if new_text == text:
+            break
+        text = new_text
+
+    # 4. Nettoyage agressif des accolades orphelines et restes de JSON
+    text = re.sub(r"^[\s\{\}\[\]\,\"']+", "", text)          # début
+    text = re.sub(r"[\s\{\}\[\]\,\"']+$", "", text)          # fin
+    text = re.sub(r"\n\s*[\{\}]\s*\n", "\n", text)           # lignes isolées { ou }
+    text = re.sub(r"\n{3,}", "\n\n", text)                   # trop de sauts de ligne
+
+    return text.strip()
+
 
 class AI(commands.Cog):
     def __init__(self, bot):
@@ -68,23 +103,17 @@ class AI(commands.Cog):
         return resp.choices[0].message.content
 
     def _find_member(self, guild: discord.Guild, username: str) -> discord.Member | None:
-        """Cherche un membre par ID (mention), display name, username ou début de nom."""
         import re as _re
-        # Cas mention Discord <@123456789>
         mention_match = _re.search(r"<@!?(\d+)>", username)
         if mention_match:
             uid = int(mention_match.group(1))
             return guild.get_member(uid)
-        # Cas ID brut
         if username.strip().isdigit():
             return guild.get_member(int(username.strip()))
-        # Cas nom
         q = username.lower().strip().lstrip("@").split("#")[0]
-        # Match exact d'abord
         for m in guild.members:
             if m.display_name.lower() == q or m.name.lower() == q:
                 return m
-        # Match partiel ensuite
         for m in guild.members:
             if m.display_name.lower().startswith(q) or m.name.lower().startswith(q):
                 return m
@@ -189,7 +218,7 @@ class AI(commands.Cog):
                     return f"❌ Membre **{p.get('username')}** introuvable."
                 reason = p.get("reason", "Demandé via IA")
                 await member.kick(reason=f"[Kryvoox IA] {reason}")
-                return f"👢 **{member.display_name}** expulsé. Raison : {reason}"
+                return f"🥾 **{member.display_name}** expulsé. Raison : {reason}"
 
             elif t == "send_message":
                 ch_name = p["channel"].lower().replace(" ", "-")
@@ -212,7 +241,7 @@ class AI(commands.Cog):
                 return "\n".join(results)
 
             else:
-                return f"⚠️ Action `{t}` non reconnue. Actions disponibles : create_text_channel, create_voice_channel, create_category, delete_channel, create_role, delete_role, add_role_to_user, remove_role_from_user, mute_user, unmute_user, kick_user, send_message, rename_server, bulk."
+                return f"⚠️ Action `{t}` non reconnue."
 
         except discord.Forbidden:
             return f"❌ Permissions insuffisantes pour `{t}`."
@@ -264,57 +293,57 @@ class AI(commands.Cog):
                 if len(history) > 20:
                     _history[message.author.id] = history[-20:]
 
-                # Cherche JSON dans bloc action OU JSON brut {"type":...}
-                action_match = re.search(r"```action\s*(\{.*?\})\s*```", reply, re.DOTALL)
+                # Extraction de l'action (si présente)
+                action_match = re.search(r"```action\s*(\{[\s\S]*?\})\s*```", reply, re.IGNORECASE)
                 if not action_match:
-                    action_match = re.search(r'(\{"type"\s*:.*?\})', reply, re.DOTALL)
+                    action_match = re.search(r'(\{\s*["\']type["\']\s*:[\s\S]*?\})', reply)
 
-                # Nettoie TOUT le JSON du texte affiché
-                text_reply = re.sub(r"```action\s*\{.*?\}\s*```", "", reply, flags=re.DOTALL)
-                text_reply = re.sub(r'\{"type"\s*:.*?\}', "", text_reply, flags=re.DOTALL)
-                text_reply = text_reply.strip()
+                # Nettoyage complet du texte affiché
+                text_reply = _clean_ai_reply(reply)
+
+                if not text_reply:
+                    text_reply = "..."
 
                 if len(text_reply) > 2000:
                     text_reply = text_reply[:1997] + "..."
+
                 await message.reply(text_reply, mention_author=False)
 
+                # Exécution de l'action uniquement si JSON valide + permissions
                 if action_match and guild:
-                    can_act = (message.author.guild_permissions.manage_guild or
-                               message.author.guild_permissions.administrator)
+                    can_act = (
+                        message.author.guild_permissions.manage_guild or
+                        message.author.guild_permissions.administrator
+                    )
                     if can_act:
                         try:
                             raw_json = action_match.group(1)
-                            # Nettoie les mentions Discord <@id> qui cassent le JSON
-                            raw_json = re.sub(r"<@!?\d+>", lambda m: m.group(0), raw_json)
-                            # Remplace les backslash invalides
-                            raw_json = raw_json.replace("\\", "\\\\")
+                            # Nettoyage basique des mentions qui cassent le JSON
+                            raw_json = re.sub(r"<@!?\d+>", "", raw_json)
                             action_data = json.loads(raw_json)
-                            result = await self._execute_action(guild, action_data)
-                            await message.channel.send(embed=E.base("⚡ Action exécutée", result))
-                        except json.JSONDecodeError:
-                            # Tentative de récupération : cherche username dans le message original
-                            await message.channel.send(embed=E.warn(
-                                "JSON mal formé par le modèle. Réessaie en précisant le nom exact du membre sans @.",
-                                "⚠️ Action échouée"
-                            ))
-                    else:
-                        await message.channel.send(embed=E.error("Permissions insuffisantes pour déclencher des actions."))
+                            if isinstance(action_data, dict) and "type" in action_data:
+                                result = await self._execute_action(guild, action_data)
+                                await message.channel.send(embed=E.base("⚡ Action exécutée", result))
+                        except (json.JSONDecodeError, KeyError, TypeError):
+                            # On n'affiche plus le message d'erreur JSON pour les conversations normales
+                            pass
+                    # Sinon on ignore silencieusement (pas d'erreur spam)
 
             except Exception as ex:
                 print(f"⚠️ Erreur IA mention : {ex}")
                 await message.reply("Systèmes temporairement indisponibles.", mention_author=False)
 
-    # ── Slash commands ────────────────────────────────────────────────────────
+    # ── Slash commands ────────────────────────────────────────────────
 
     @app_commands.command(name="ai", description="Pose une question à Kryvoox IA")
     async def ai_cmd(self, i: discord.Interaction, prompt: str):
         await i.response.defer()
         try:
             reply = await self._ask(SYSTEM_PROMPT, prompt, _history[i.user.id])
-            text = re.sub(r"```action\s*\{.*?\}\s*```", "", reply, flags=re.DOTALL).strip()
+            text = _clean_ai_reply(reply)
             e = E.base("🤖 Kryvoox IA")
             e.add_field(name="Question", value=prompt[:1000], inline=False)
-            e.add_field(name="Réponse",  value=text[:1000] or "...", inline=False)
+            e.add_field(name="Réponse", value=text[:1000] or "...", inline=False)
             await i.followup.send(embed=e)
         except Exception as ex:
             await i.followup.send(embed=E.error(f"Erreur IA : {ex}"))
@@ -323,7 +352,7 @@ class AI(commands.Cog):
     async def summarize(self, i: discord.Interaction, text: str):
         await i.response.defer()
         reply = await self._ask("Résume ce texte de façon concise en français.", text, [])
-        await i.followup.send(embed=E.base("📝 Résumé", reply[:1500]))
+        await i.followup.send(embed=E.base("📝 Résumé", _clean_ai_reply(reply)[:1500]))
 
     @app_commands.command(name="translate", description="Traduit un texte")
     @app_commands.describe(text="Le texte", target_lang="Langue cible")
@@ -331,8 +360,8 @@ class AI(commands.Cog):
         await i.response.defer()
         reply = await self._ask(f"Traduis en {target_lang}. Donne uniquement la traduction.", text, [])
         e = E.base(f"🌍 → {target_lang.capitalize()}")
-        e.add_field(name="Original",   value=text[:800],  inline=False)
-        e.add_field(name="Traduction", value=reply[:800], inline=False)
+        e.add_field(name="Original", value=text[:800], inline=False)
+        e.add_field(name="Traduction", value=_clean_ai_reply(reply)[:800], inline=False)
         await i.followup.send(embed=e)
 
     @app_commands.command(name="code", description="Génère du code")
@@ -343,14 +372,15 @@ class AI(commands.Cog):
             f"Expert {language}. Code propre et commenté dans un bloc ```{language.lower()}...```",
             prompt, [], max_tokens=900
         )
-        if len(reply) > 1990: reply = reply[:1990] + "..."
+        if len(reply) > 1990:
+            reply = reply[:1990] + "..."
         await i.followup.send(reply)
 
     @app_commands.command(name="explain", description="Explique un concept ou du code")
     async def explain(self, i: discord.Interaction, text: str):
         await i.response.defer()
         reply = await self._ask("Explique clairement et simplement en français.", text, [])
-        await i.followup.send(embed=E.base("💡 Explication", reply[:1500]))
+        await i.followup.send(embed=E.base("💡 Explication", _clean_ai_reply(reply)[:1500]))
 
     @app_commands.command(name="rewrite", description="Réécrit un texte")
     @app_commands.describe(text="Le texte", style="Style : formel, casual, persuasif...")
@@ -358,8 +388,8 @@ class AI(commands.Cog):
         await i.response.defer()
         reply = await self._ask(f"Réécris en style {style} en français. Texte uniquement.", text, [])
         e = E.base("✍️ Réécriture")
-        e.add_field(name="Original", value=text[:800],  inline=False)
-        e.add_field(name="Résultat", value=reply[:800], inline=False)
+        e.add_field(name="Original", value=text[:800], inline=False)
+        e.add_field(name="Résultat", value=_clean_ai_reply(reply)[:800], inline=False)
         await i.followup.send(embed=e)
 
     @app_commands.command(name="resetai", description="Réinitialise ta conversation avec Kryvoox")
