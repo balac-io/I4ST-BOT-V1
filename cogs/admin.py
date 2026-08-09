@@ -1,108 +1,392 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.ui import View, Select, Button, ChannelSelect, RoleSelect
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from utils import embeds as E, db
+
+# Image de bienvenue par défaut (style anime banner)
+DEFAULT_WELCOME_IMAGE = "https://i.imgur.com/8Km9tLL.gif"  # placeholder style anime welcome
+
+
+def _status(val, yes="✅", no="❌"):
+    return yes if val else no
+
+
+def _build_dashboard_embed(guild: discord.Guild, cfg: dict) -> discord.Embed:
+    e = discord.Embed(
+        title="⚙️  Kryvoox — Dashboard Configuration",
+        description=f"**Serveur :** {guild.name}\nSélectionne une catégorie ci-dessous pour configurer.",
+        color=discord.Color.from_str("#5865F2")
+    )
+    if guild.icon:
+        e.set_thumbnail(url=guild.icon.url)
+
+    # Ligne compacte des status
+    logs = f"<#{cfg['log_channel']}>" if cfg.get("log_channel") else "—"
+    wel  = f"<#{cfg['welcome_channel']}>" if cfg.get("welcome_channel") else "—"
+    bye  = f"<#{cfg.get('goodbye_channel')}>" if cfg.get("goodbye_channel") else "—"
+    auto = f"<@&{cfg['autorole']}>" if cfg.get("autorole") else "—"
+    ver  = f"<@&{cfg.get('verify_role')}>" if cfg.get("verify_role") else "—"
+
+    e.add_field(
+        name="📋 Salons",
+        value=f"Logs · {logs}\nWelcome · {wel}\nGoodbye · {bye}",
+        inline=True
+    )
+    e.add_field(
+        name="🎭 Rôles",
+        value=f"Autorole · {auto}\nVerify · {ver}",
+        inline=True
+    )
+    e.add_field(
+        name="🛡️ Sécurité",
+        value=(
+            f"Anti-spam {_status(cfg.get('antispam'))}\n"
+            f"Anti-invite {_status(cfg.get('antiinvite'))}\n"
+            f"Anti-bot {_status(cfg.get('antibot'))}\n"
+            f"Anti-nuke {_status(cfg.get('antinuke'))}"
+        ),
+        inline=True
+    )
+
+    e.set_footer(text="Kryvoox Config • Clique sur le menu pour modifier")
+    e.timestamp = discord.utils.utcnow()
+    return e
+
+
+# ─── Views du Dashboard ────────────────────────────────────────────
+
+class ConfigSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Salons (Logs / Welcome / Goodbye)", value="channels", emoji="📋", description="Configurer les salons"),
+            discord.SelectOption(label="Rôles (Autorole / Verify)", value="roles", emoji="🎭", description="Configurer les rôles auto"),
+            discord.SelectOption(label="Sécurité", value="security", emoji="🛡️", description="Anti-spam, invite, bot, nuke"),
+            discord.SelectOption(label="Welcome personnalisé", value="welcome_custom", emoji="👋", description="Message + image de bienvenue"),
+            discord.SelectOption(label="Rafraîchir", value="refresh", emoji="🔄", description="Mettre à jour le dashboard"),
+        ]
+        super().__init__(placeholder="Choisir une catégorie…", options=options, custom_id="config_main_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        cfg = db.get_guild(interaction.guild.id)
+
+        if value == "refresh":
+            embed = _build_dashboard_embed(interaction.guild, cfg)
+            await interaction.response.edit_message(embed=embed, view=ConfigDashboardView())
+            return
+
+        if value == "channels":
+            view = ChannelsConfigView()
+            embed = discord.Embed(
+                title="📋 Configuration des Salons",
+                description="Utilise les menus ci-dessous pour définir les salons.",
+                color=discord.Color.blurple()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+
+        if value == "roles":
+            view = RolesConfigView()
+            embed = discord.Embed(
+                title="🎭 Configuration des Rôles",
+                description="Choisis les rôles automatiques.",
+                color=discord.Color.blurple()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+
+        if value == "security":
+            view = SecurityConfigView(cfg)
+            embed = discord.Embed(
+                title="🛡️ Configuration Sécurité",
+                description="Active ou désactive les protections.",
+                color=discord.Color.blurple()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+
+        if value == "welcome_custom":
+            view = WelcomeCustomView()
+            embed = discord.Embed(
+                title="👋 Welcome personnalisé",
+                description=(
+                    "Configure le message et l'image de bienvenue.\n\n"
+                    "**Variables disponibles :**\n"
+                    "`{user}` — mention du membre\n"
+                    "`{server}` — nom du serveur\n"
+                    "`{count}` — nombre de membres\n\n"
+                    f"**Message actuel :**\n`{cfg.get('welcome_msg', 'Bienvenue {user} !')}`"
+                ),
+                color=discord.Color.green()
+            )
+            img = cfg.get("welcome_image") or DEFAULT_WELCOME_IMAGE
+            embed.set_image(url=img)
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+
+
+class ConfigDashboardView(View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(ConfigSelect())
+
+
+class BackButton(Button):
+    def __init__(self):
+        super().__init__(label="← Retour", style=discord.ButtonStyle.secondary, custom_id="config_back")
+
+    async def callback(self, interaction: discord.Interaction):
+        cfg = db.get_guild(interaction.guild.id)
+        embed = _build_dashboard_embed(interaction.guild, cfg)
+        await interaction.response.edit_message(embed=embed, view=ConfigDashboardView())
+
+
+# ── Channels ────────────────────────────────────────────────────────
+
+class LogChannelSelect(ChannelSelect):
+    def __init__(self):
+        super().__init__(placeholder="Salon de logs…", channel_types=[discord.ChannelType.text], max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = self.values[0]
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["log_channel"] = ch.id
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success(f"Logs → {ch.mention}"), ephemeral=True)
+
+
+class WelcomeChannelSelect(ChannelSelect):
+    def __init__(self):
+        super().__init__(placeholder="Salon de bienvenue…", channel_types=[discord.ChannelType.text], max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = self.values[0]
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["welcome_channel"] = ch.id
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success(f"Welcome → {ch.mention}"), ephemeral=True)
+
+
+class GoodbyeChannelSelect(ChannelSelect):
+    def __init__(self):
+        super().__init__(placeholder="Salon d'au revoir…", channel_types=[discord.ChannelType.text], max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = self.values[0]
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["goodbye_channel"] = ch.id
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success(f"Goodbye → {ch.mention}"), ephemeral=True)
+
+
+class ChannelsConfigView(View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(LogChannelSelect())
+        self.add_item(WelcomeChannelSelect())
+        self.add_item(GoodbyeChannelSelect())
+        self.add_item(BackButton())
+
+
+# ── Roles ───────────────────────────────────────────────────────────
+
+class AutoroleSelect(RoleSelect):
+    def __init__(self):
+        super().__init__(placeholder="Rôle automatique…", max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        role = self.values[0]
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["autorole"] = role.id
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success(f"Autorole → {role.mention}"), ephemeral=True)
+
+
+class VerifyRoleSelect(RoleSelect):
+    def __init__(self):
+        super().__init__(placeholder="Rôle de vérification…", max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        role = self.values[0]
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["verify_role"] = role.id
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success(f"Verify → {role.mention}"), ephemeral=True)
+
+
+class RolesConfigView(View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(AutoroleSelect())
+        self.add_item(VerifyRoleSelect())
+        self.add_item(BackButton())
+
+
+# ── Security ────────────────────────────────────────────────────────
+
+class SecurityConfigView(View):
+    def __init__(self, cfg: dict):
+        super().__init__(timeout=180)
+        self.cfg = cfg
+
+        self.antispam_btn = Button(
+            label=f"Anti-spam {'ON' if cfg.get('antispam') else 'OFF'}",
+            style=discord.ButtonStyle.success if cfg.get("antispam") else discord.ButtonStyle.danger,
+            custom_id="toggle_antispam"
+        )
+        self.antispam_btn.callback = self.toggle_antispam
+        self.add_item(self.antispam_btn)
+
+        self.antiinvite_btn = Button(
+            label=f"Anti-invite {'ON' if cfg.get('antiinvite') else 'OFF'}",
+            style=discord.ButtonStyle.success if cfg.get("antiinvite") else discord.ButtonStyle.danger,
+            custom_id="toggle_antiinvite"
+        )
+        self.antiinvite_btn.callback = self.toggle_antiinvite
+        self.add_item(self.antiinvite_btn)
+
+        self.antibot_btn = Button(
+            label=f"Anti-bot {'ON' if cfg.get('antibot') else 'OFF'}",
+            style=discord.ButtonStyle.success if cfg.get("antibot") else discord.ButtonStyle.danger,
+            custom_id="toggle_antibot"
+        )
+        self.antibot_btn.callback = self.toggle_antibot
+        self.add_item(self.antibot_btn)
+
+        self.antinuke_btn = Button(
+            label=f"Anti-nuke {'ON' if cfg.get('antinuke') else 'OFF'}",
+            style=discord.ButtonStyle.success if cfg.get("antinuke") else discord.ButtonStyle.danger,
+            custom_id="toggle_antinuke"
+        )
+        self.antinuke_btn.callback = self.toggle_antinuke
+        self.add_item(self.antinuke_btn)
+
+        self.add_item(BackButton())
+
+    async def _toggle(self, interaction: discord.Interaction, key: str, btn: Button):
+        cfg = db.get_guild(interaction.guild.id)
+        cfg[key] = not cfg.get(key, False)
+        db.save_guild(interaction.guild.id, cfg)
+        btn.label = f"{key.replace('anti', 'Anti-').title()} {'ON' if cfg[key] else 'OFF'}"
+        btn.style = discord.ButtonStyle.success if cfg[key] else discord.ButtonStyle.danger
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(embed=E.success(f"**{key}** → {'activé' if cfg[key] else 'désactivé'}"), ephemeral=True)
+
+    async def toggle_antispam(self, interaction: discord.Interaction):
+        await self._toggle(interaction, "antispam", self.antispam_btn)
+
+    async def toggle_antiinvite(self, interaction: discord.Interaction):
+        await self._toggle(interaction, "antiinvite", self.antiinvite_btn)
+
+    async def toggle_antibot(self, interaction: discord.Interaction):
+        await self._toggle(interaction, "antibot", self.antibot_btn)
+
+    async def toggle_antinuke(self, interaction: discord.Interaction):
+        await self._toggle(interaction, "antinuke", self.antinuke_btn)
+
+
+# ── Welcome Custom ──────────────────────────────────────────────────
+
+class WelcomeCustomView(View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+        set_msg = Button(label="Modifier le message", style=discord.ButtonStyle.primary, emoji="✍️")
+        set_msg.callback = self.set_message
+        self.add_item(set_msg)
+
+        set_img = Button(label="Définir l'image (URL)", style=discord.ButtonStyle.primary, emoji="🖼️")
+        set_img.callback = self.set_image
+        self.add_item(set_img)
+
+        preview = Button(label="Aperçu", style=discord.ButtonStyle.success, emoji="👁️")
+        preview.callback = self.preview
+        self.add_item(preview)
+
+        self.add_item(BackButton())
+
+    async def set_message(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(WelcomeMessageModal())
+
+    async def set_image(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(WelcomeImageModal())
+
+    async def preview(self, interaction: discord.Interaction):
+        cfg = db.get_guild(interaction.guild.id)
+        msg = cfg.get("welcome_msg", "Bienvenue {user} sur {server} !").format(
+            user=interaction.user.mention,
+            server=interaction.guild.name,
+            count=interaction.guild.member_count
+        )
+        e = discord.Embed(
+            title="👋 Bienvenue !",
+            description=msg,
+            color=discord.Color.from_str("#57F287")
+        )
+        e.set_thumbnail(url=interaction.user.display_avatar.url)
+        img = cfg.get("welcome_image") or DEFAULT_WELCOME_IMAGE
+        e.set_image(url=img)
+        e.set_footer(text=f"Tu es le {interaction.guild.member_count}ème membre • Kryvoox")
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+class WelcomeMessageModal(discord.ui.Modal, title="Message de bienvenue"):
+    message = discord.ui.TextInput(
+        label="Message",
+        style=discord.TextStyle.paragraph,
+        placeholder="Bienvenue {user} sur {server} ! Tu es le {count}ème membre.",
+        max_length=500,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["welcome_msg"] = self.message.value
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success("Message de bienvenue mis à jour !"), ephemeral=True)
+
+
+class WelcomeImageModal(discord.ui.Modal, title="Image de bienvenue"):
+    url = discord.ui.TextInput(
+        label="URL de l'image (gif/png/jpg)",
+        placeholder="https://... (ex: banner anime)",
+        max_length=300,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = db.get_guild(interaction.guild.id)
+        cfg["welcome_image"] = self.url.value.strip()
+        db.save_guild(interaction.guild.id, cfg)
+        await interaction.response.send_message(embed=E.success("Image de bienvenue définie !"), ephemeral=True)
+
+
+# ─── Cog ─────────────────────────────────────────────────────────────
 
 class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── /setup ────────────────────────────────────────────────────────────────
+    # ── /config (Dashboard principal) ───────────────────────────────────
 
-    @app_commands.command(name="setup", description="Assistant de configuration Kryvoox")
+    @app_commands.command(name="config", description="Ouvre le dashboard de configuration Kryvoox")
+    @app_commands.default_permissions(administrator=True)
+    async def config(self, i: discord.Interaction):
+        cfg = db.get_guild(i.guild.id)
+        embed = _build_dashboard_embed(i.guild, cfg)
+        await i.response.send_message(embed=embed, view=ConfigDashboardView(), ephemeral=True)
+
+    # ── /setup (alias rapide) ─────────────────────────────────────────
+
+    @app_commands.command(name="setup", description="Ouvre le dashboard de configuration")
     @app_commands.default_permissions(administrator=True)
     async def setup(self, i: discord.Interaction):
-        cfg = db.get_guild(i.guild.id)
-        e = E.base("⚙️ Configuration actuelle — Kryvoox")
-        e.add_field(name="📋 Logs",    value=f"<#{cfg['log_channel']}>" if cfg.get("log_channel") else "❌ Non défini")
-        e.add_field(name="👋 Welcome", value=f"<#{cfg['welcome_channel']}>" if cfg.get("welcome_channel") else "❌ Non défini")
-        e.add_field(name="👋 Goodbye", value=f"<#{cfg.get('goodbye_channel')}>" if cfg.get("goodbye_channel") else "❌ Non défini")
-        e.add_field(name="🎭 Autorole", value=f"<@&{cfg['autorole']}>" if cfg.get("autorole") else "❌ Non défini")
-        e.add_field(name="✅ Verify",  value=f"<@&{cfg.get('verify_role')}>" if cfg.get("verify_role") else "❌ Non défini")
-        e.add_field(name="🛡️ Anti-spam",   value="✅" if cfg.get("antispam") else "❌")
-        e.add_field(name="🔗 Anti-invite", value="✅" if cfg.get("antiinvite") else "❌")
-        e.add_field(name="🤖 Anti-bot",    value="✅" if cfg.get("antibot") else "❌")
-        e.description = "Utilisez les commandes `/config` pour modifier ces paramètres."
-        await i.response.send_message(embed=e)
+        await self.config(i)
 
-    # ── /config ───────────────────────────────────────────────────────────────
-
-    config_group = app_commands.Group(name="config", description="Configuration du serveur")
-
-    @config_group.command(name="logs", description="Définit le salon de logs")
-    @app_commands.default_permissions(administrator=True)
-    async def config_logs(self, i: discord.Interaction, channel: discord.TextChannel):
-        cfg = db.get_guild(i.guild.id)
-        cfg["log_channel"] = channel.id
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Salon de logs défini : {channel.mention}"))
-
-    @config_group.command(name="welcome", description="Définit le salon de bienvenue")
-    @app_commands.default_permissions(administrator=True)
-    async def config_welcome(self, i: discord.Interaction, channel: discord.TextChannel, message: str = "Bienvenue {user} sur {server} !"):
-        cfg = db.get_guild(i.guild.id)
-        cfg["welcome_channel"] = channel.id
-        cfg["welcome_msg"] = message
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Welcome configuré dans {channel.mention}\nMessage : `{message}`"))
-
-    @config_group.command(name="goodbye", description="Définit le salon d'aurevoir")
-    @app_commands.default_permissions(administrator=True)
-    async def config_goodbye(self, i: discord.Interaction, channel: discord.TextChannel, message: str = "Au revoir {user}."):
-        cfg = db.get_guild(i.guild.id)
-        cfg["goodbye_channel"] = channel.id
-        cfg["goodbye_msg"] = message
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Goodbye configuré dans {channel.mention}"))
-
-    @config_group.command(name="autorole", description="Rôle donné automatiquement aux nouveaux membres")
-    @app_commands.default_permissions(administrator=True)
-    async def config_autorole(self, i: discord.Interaction, role: discord.Role = None):
-        cfg = db.get_guild(i.guild.id)
-        cfg["autorole"] = role.id if role else None
-        db.save_guild(i.guild.id, cfg)
-        msg = f"Autorole défini : {role.mention}" if role else "Autorole désactivé."
-        await i.response.send_message(embed=E.success(msg))
-
-    @config_group.command(name="antispam", description="Active/désactive l'anti-spam")
-    @app_commands.default_permissions(administrator=True)
-    async def config_antispam(self, i: discord.Interaction, enabled: bool):
-        cfg = db.get_guild(i.guild.id)
-        cfg["antispam"] = enabled
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Anti-spam {'activé ✅' if enabled else 'désactivé ❌'}."))
-
-    @config_group.command(name="antiinvite", description="Bloque les invitations Discord")
-    @app_commands.default_permissions(administrator=True)
-    async def config_antiinvite(self, i: discord.Interaction, enabled: bool):
-        cfg = db.get_guild(i.guild.id)
-        cfg["antiinvite"] = enabled
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Anti-invite {'activé ✅' if enabled else 'désactivé ❌'}."))
-
-    @config_group.command(name="antibot", description="Empêche les bots de rejoindre")
-    @app_commands.default_permissions(administrator=True)
-    async def config_antibot(self, i: discord.Interaction, enabled: bool):
-        cfg = db.get_guild(i.guild.id)
-        cfg["antibot"] = enabled
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Anti-bot {'activé ✅' if enabled else 'désactivé ❌'}."))
-
-    @config_group.command(name="addshopitem", description="Ajoute un item à la boutique")
-    @app_commands.default_permissions(administrator=True)
-    async def config_addshopitem(self, i: discord.Interaction, item_id: str, name: str, price: int, role: discord.Role = None, description: str = "Item spécial"):
-        cfg = db.get_guild(i.guild.id)
-        cfg.setdefault("shop", {})[item_id] = {
-            "name": name, "price": price,
-            "role_id": role.id if role else None,
-            "desc": description
-        }
-        db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Item **{name}** ajouté à la boutique pour **{price} coins**."))
-
-    # ── /logs ─────────────────────────────────────────────────────────────────
+    # ── Commandes individuelles gardées pour compatibilité ──────────────
 
     @app_commands.command(name="logs", description="Définit ou affiche le salon de logs")
     @app_commands.default_permissions(manage_guild=True)
@@ -113,10 +397,8 @@ class Admin(commands.Cog):
             db.save_guild(i.guild.id, cfg)
             await i.response.send_message(embed=E.success(f"Logs → {channel.mention}"))
         else:
-            ch = i.guild.get_channel(cfg.get("log_channel", 0))
+            ch = i.guild.get_channel(cfg.get("log_channel") or 0)
             await i.response.send_message(embed=E.info(f"Salon de logs actuel : {ch.mention if ch else '❌ Non défini'}"))
-
-    # ── /autorole ─────────────────────────────────────────────────────────────
 
     @app_commands.command(name="autorole", description="Rôle automatique pour les nouveaux membres")
     @app_commands.default_permissions(manage_roles=True)
@@ -126,8 +408,6 @@ class Admin(commands.Cog):
         db.save_guild(i.guild.id, cfg)
         await i.response.send_message(embed=E.success(f"Autorole → {role.mention if role else 'désactivé'}"))
 
-    # ── /welcome ──────────────────────────────────────────────────────────────
-
     @app_commands.command(name="welcome", description="Configure le message de bienvenue")
     @app_commands.default_permissions(manage_guild=True)
     async def welcome(self, i: discord.Interaction, channel: discord.TextChannel, message: str = "Bienvenue {user} sur {server} !"):
@@ -135,9 +415,9 @@ class Admin(commands.Cog):
         cfg["welcome_channel"] = channel.id
         cfg["welcome_msg"] = message
         db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(embed=E.success(f"Welcome → {channel.mention}\nMessage : `{message}`\nVariables : `{{user}}`, `{{server}}`, `{{count}}`"))
-
-    # ── /goodbye ──────────────────────────────────────────────────────────────
+        await i.response.send_message(embed=E.success(
+            f"Welcome → {channel.mention}\nMessage : `{message}`\nVariables : `{{user}}`, `{{server}}`, `{{count}}`"
+        ))
 
     @app_commands.command(name="goodbye", description="Configure le message d'au revoir")
     @app_commands.default_permissions(manage_guild=True)
@@ -148,26 +428,24 @@ class Admin(commands.Cog):
         db.save_guild(i.guild.id, cfg)
         await i.response.send_message(embed=E.success(f"Goodbye → {channel.mention}"))
 
-    # ── /embed ────────────────────────────────────────────────────────────────
-
     @app_commands.command(name="embed", description="Envoie un embed personnalisé")
     @app_commands.default_permissions(manage_messages=True)
     async def embed_cmd(self, i: discord.Interaction, title: str, description: str, color: str = "blue", channel: discord.TextChannel = None):
-        colors = {"red": discord.Color.red(), "green": discord.Color.green(), "blue": discord.Color.blue(),
-                  "gold": discord.Color.gold(), "purple": discord.Color.purple(), "orange": discord.Color.orange()}
+        colors = {
+            "red": discord.Color.red(), "green": discord.Color.green(), "blue": discord.Color.blue(),
+            "gold": discord.Color.gold(), "purple": discord.Color.purple(), "orange": discord.Color.orange()
+        }
         c = colors.get(color.lower(), discord.Color.blue())
         e = discord.Embed(title=title, description=description, color=c)
         ch = channel or i.channel
         await ch.send(embed=e)
         await i.response.send_message(embed=E.success(f"Embed envoyé dans {ch.mention}."), ephemeral=True)
 
-    # ── /poll ─────────────────────────────────────────────────────────────────
-
     @app_commands.command(name="poll", description="Crée un sondage")
     @app_commands.describe(question="La question", options="Options séparées par | (max 5)")
     async def poll(self, i: discord.Interaction, question: str, options: str = "Oui|Non"):
         opts = [o.strip() for o in options.split("|")][:5]
-        emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣"]
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
         desc = "\n".join(f"{emojis[idx]} {opt}" for idx, opt in enumerate(opts))
         e = E.base(f"📊 {question}", desc)
         e.set_footer(text=f"Sondage créé par {i.user.display_name}")
@@ -175,8 +453,6 @@ class Admin(commands.Cog):
         for idx in range(len(opts)):
             await msg.add_reaction(emojis[idx])
         await i.response.send_message(embed=E.success("Sondage créé !"), ephemeral=True)
-
-    # ── /announcement ─────────────────────────────────────────────────────────
 
     @app_commands.command(name="announcement", description="Envoie une annonce")
     @app_commands.default_permissions(manage_messages=True)
@@ -187,8 +463,6 @@ class Admin(commands.Cog):
         content = f"@everyone {ping}" if ping == "everyone" else f"<@&{ping}>" if ping.isdigit() else ""
         await ch.send(content=content, embed=e)
         await i.response.send_message(embed=E.success(f"Annonce envoyée dans {ch.mention}."), ephemeral=True)
-
-    # ── /serverlock / /serverunlock ───────────────────────────────────────────
 
     @app_commands.command(name="serverlock", description="Verrouille tous les salons")
     @app_commands.default_permissions(administrator=True)
@@ -206,8 +480,6 @@ class Admin(commands.Cog):
             await ch.set_permissions(i.guild.default_role, send_messages=None)
         await i.followup.send(embed=E.success("🔓 Serveur déverrouillé."))
 
-    # ── /verify ───────────────────────────────────────────────────────────────
-
     @app_commands.command(name="verify", description="Configure le rôle de vérification")
     @app_commands.default_permissions(administrator=True)
     async def verify(self, i: discord.Interaction, role: discord.Role):
@@ -215,8 +487,6 @@ class Admin(commands.Cog):
         cfg["verify_role"] = role.id
         db.save_guild(i.guild.id, cfg)
         await i.response.send_message(embed=E.success(f"Rôle de vérification → {role.mention}"))
-
-    # ── /backup ───────────────────────────────────────────────────────────────
 
     @app_commands.command(name="backup", description="Sauvegarde la configuration du serveur")
     @app_commands.default_permissions(administrator=True)
@@ -226,8 +496,6 @@ class Admin(commands.Cog):
         data = json.dumps(cfg, indent=2, ensure_ascii=False)
         f = discord.File(fp=io.StringIO(data), filename=f"backup-{i.guild.id}.json")
         await i.response.send_message(embed=E.success("Backup généré."), file=f)
-
-    # ── /antiinvite / /antilink ───────────────────────────────────────────────
 
     @app_commands.command(name="antiinvite", description="Active/désactive le filtre d'invitations Discord")
     @app_commands.default_permissions(manage_guild=True)
@@ -261,28 +529,49 @@ class Admin(commands.Cog):
         db.save_guild(i.guild.id, cfg)
         await i.response.send_message(embed=E.success(f"Anti-bot {'activé ✅' if enabled else 'désactivé ❌'}."))
 
-    # ── Events welcome/goodbye/autorole ───────────────────────────────────────
+    # ── Events ──────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         cfg = db.get_guild(member.guild.id)
+
         if cfg.get("antibot") and member.bot:
-            await member.kick(reason="Anti-bot activé")
+            try:
+                await member.kick(reason="Anti-bot activé")
+            except Exception:
+                pass
             return
+
         if cfg.get("autorole"):
             role = member.guild.get_role(cfg["autorole"])
             if role:
-                await member.add_roles(role)
+                try:
+                    await member.add_roles(role)
+                except Exception:
+                    pass
+
         if cfg.get("welcome_channel"):
             ch = member.guild.get_channel(cfg["welcome_channel"])
             if ch:
-                msg = cfg.get("welcome_msg","Bienvenue {user} !").format(
-                    user=member.mention, server=member.guild.name,
+                msg = cfg.get("welcome_msg", "Bienvenue {user} sur {server} !").format(
+                    user=member.mention,
+                    server=member.guild.name,
                     count=member.guild.member_count
                 )
-                e = E.base("👋 Bienvenue !", msg, discord.Color.green())
+                e = discord.Embed(
+                    title="👋 Bienvenue !",
+                    description=msg,
+                    color=discord.Color.from_str("#57F287")
+                )
                 e.set_thumbnail(url=member.display_avatar.url)
-                await ch.send(embed=e)
+                img = cfg.get("welcome_image") or DEFAULT_WELCOME_IMAGE
+                e.set_image(url=img)
+                e.set_footer(text=f"Tu es le {member.guild.member_count}ème membre • Kryvoox")
+                e.timestamp = discord.utils.utcnow()
+                try:
+                    await ch.send(embed=e)
+                except Exception:
+                    pass
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
@@ -290,11 +579,14 @@ class Admin(commands.Cog):
         if cfg.get("goodbye_channel"):
             ch = member.guild.get_channel(cfg["goodbye_channel"])
             if ch:
-                msg = cfg.get("goodbye_msg","Au revoir {user}.").format(
+                msg = cfg.get("goodbye_msg", "Au revoir {user}.").format(
                     user=str(member), server=member.guild.name
                 )
                 e = E.base("👋 Au revoir", msg, discord.Color.red())
-                await ch.send(embed=e)
+                try:
+                    await ch.send(embed=e)
+                except Exception:
+                    pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -303,11 +595,23 @@ class Admin(commands.Cog):
         cfg = db.get_guild(message.guild.id)
         import re
         if cfg.get("antiinvite") and re.search(r"discord\.gg/\S+", message.content, re.IGNORECASE):
-            await message.delete()
-            await message.channel.send(embed=E.error(f"{message.author.mention} les invitations Discord sont interdites."), delete_after=5)
+            try:
+                await message.delete()
+                await message.channel.send(
+                    embed=E.error(f"{message.author.mention} les invitations Discord sont interdites."),
+                    delete_after=5
+                )
+            except Exception:
+                pass
         if cfg.get("antilink") and re.search(r"https?://(?!discord)", message.content, re.IGNORECASE):
-            await message.delete()
-            await message.channel.send(embed=E.error(f"{message.author.mention} les liens externes sont interdits."), delete_after=5)
+            try:
+                await message.delete()
+                await message.channel.send(
+                    embed=E.error(f"{message.author.mention} les liens externes sont interdits."),
+                    delete_after=5
+                )
+            except Exception:
+                pass
 
 
 async def setup(bot):
