@@ -1,8 +1,8 @@
 """
-╔═══════════════════════════════════════╗
+╔══════════════════════════════════════╗
 ║         KRYVOOX  — Bot SaaS           ║
 ║  discord.py · Slash Commands · Groq   ║
-╚═══════════════════════════════════════╝
+╚══════════════════════════════════════╝
 """
 
 import os
@@ -13,16 +13,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN    = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# ─── Bot ──────────────────────────────────────────────────────────────────────
 
 class Kryvoox(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(
-            command_prefix="!",          # fallback, slash commands prioritaires
+            command_prefix="!",
             intents=intents,
             help_command=None,
             application_id=int(os.getenv("APP_ID", "0"))
@@ -30,7 +29,6 @@ class Kryvoox(commands.Bot):
         self.start_time = discord.utils.utcnow()
 
     async def setup_hook(self):
-        """Charge tous les cogs et sync les slash commands."""
         cogs = [
             "cogs.info",
             "cogs.moderation",
@@ -43,6 +41,7 @@ class Kryvoox(commands.Bot):
             "cogs.utils",
             "cogs.stats",
             "cogs.levels",
+            "cogs.premium",
         ]
         for cog in cogs:
             try:
@@ -51,7 +50,6 @@ class Kryvoox(commands.Bot):
             except Exception as e:
                 print(f"  ❌ {cog} : {e}")
 
-        # Sync global (peut prendre jusqu'à 1h pour se propager partout)
         synced = await self.tree.sync()
         print(f"\n🌐 {len(synced)} slash commands synchronisées")
 
@@ -66,6 +64,7 @@ class Kryvoox(commands.Bot):
                 name=f"/help | {len(self.guilds)} serveurs"
             )
         )
+
 
 bot = Kryvoox()
 

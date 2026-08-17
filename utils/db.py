@@ -1,13 +1,11 @@
 """
 Kryvoox Database — SQLite (solide & fiable)
-Remplace l'ancien stockage JSON.
-Les fonctions publiques restent identiques pour ne rien casser.
 """
 
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 DB_PATH = "data/kryvoox.db"
@@ -36,16 +34,18 @@ def _db():
 def _init_tables(conn: sqlite3.Connection):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS users (
-        user_id     TEXT PRIMARY KEY,
-        bio         TEXT,
-        coins       INTEGER DEFAULT 0,
-        bank        INTEGER DEFAULT 0,
-        xp          INTEGER DEFAULT 0,
-        level       INTEGER DEFAULT 1,
-        inventory   TEXT DEFAULT '[]',
-        last_daily  TEXT,
-        last_work   TEXT,
-        total_msgs  INTEGER DEFAULT 0
+        user_id       TEXT PRIMARY KEY,
+        bio           TEXT,
+        coins         INTEGER DEFAULT 0,
+        bank          INTEGER DEFAULT 0,
+        xp            INTEGER DEFAULT 0,
+        level         INTEGER DEFAULT 1,
+        inventory     TEXT DEFAULT '[]',
+        last_daily    TEXT,
+        last_work     TEXT,
+        total_msgs    INTEGER DEFAULT 0,
+        premium       INTEGER DEFAULT 0,
+        premium_until TEXT
     );
 
     CREATE TABLE IF NOT EXISTS guilds (
@@ -95,9 +95,24 @@ def _init_tables(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins + bank DESC);
     """)
 
-    for col, default in [("level_roles", "'{}'"), ("welcome_image", "NULL")]:
+    for col, default in [
+        ("level_roles", "'{}'"),
+        ("welcome_image", "NULL"),
+        ("premium", "0"),
+        ("premium_until", "NULL"),
+    ]:
         try:
-            conn.execute(f"ALTER TABLE guilds ADD COLUMN {col} TEXT DEFAULT {default}")
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT {default}" if col in ("premium_until",) else f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT {default}" if col == "premium" else f"ALTER TABLE guilds ADD COLUMN {col} TEXT DEFAULT {default}")
+        except sqlite3.OperationalError:
+            pass
+
+    # Ensure premium columns on users
+    for col, sql in [
+        ("premium", "ALTER TABLE users ADD COLUMN premium INTEGER DEFAULT 0"),
+        ("premium_until", "ALTER TABLE users ADD COLUMN premium_until TEXT"),
+    ]:
+        try:
+            conn.execute(sql)
         except sqlite3.OperationalError:
             pass
 
@@ -115,12 +130,13 @@ def _migrate_from_json(conn: sqlite3.Connection):
     for uid, u in data.get("users", {}).items():
         conn.execute("""
             INSERT OR REPLACE INTO users
-            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             str(uid), u.get("bio"), u.get("coins", 0), u.get("bank", 0),
             u.get("xp", 0), u.get("level", 1), json.dumps(u.get("inventory", [])),
             u.get("last_daily"), u.get("last_work"), u.get("total_msgs", 0),
+            1 if u.get("premium") else 0, u.get("premium_until"),
         ))
 
     for gid, g in data.get("guilds", {}).items():
@@ -148,18 +164,13 @@ def _migrate_from_json(conn: sqlite3.Connection):
         except ValueError:
             continue
         for w in warns:
-            conn.execute("""
-                INSERT INTO warnings (guild_id, user_id, reason, mod, date, warn_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (str(gid), str(uid), w.get("reason"), w.get("mod"), w.get("date"), w.get("id", 1)))
+            conn.execute("INSERT INTO warnings (guild_id, user_id, reason, mod, date, warn_id) VALUES (?, ?, ?, ?, ?, ?)",
+                         (str(gid), str(uid), w.get("reason"), w.get("mod"), w.get("date"), w.get("id", 1)))
 
     for gid, tickets in data.get("tickets", {}).items():
         for tid, t in tickets.items():
-            conn.execute("""
-                INSERT OR REPLACE INTO tickets
-                (guild_id, ticket_id, channel_id, user_id, category, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (str(gid), str(tid), t.get("channel_id"), t.get("user_id"), t.get("category"), t.get("status", "open")))
+            conn.execute("INSERT OR REPLACE INTO tickets (guild_id, ticket_id, channel_id, user_id, category, status) VALUES (?, ?, ?, ?, ?, ?)",
+                         (str(gid), str(tid), t.get("channel_id"), t.get("user_id"), t.get("category"), t.get("status", "open")))
 
     try:
         os.rename(OLD_JSON, OLD_JSON + ".migrated")
@@ -179,12 +190,15 @@ _boot()
 def _row_to_user(row: sqlite3.Row) -> dict:
     if row is None:
         return None
+    keys = row.keys()
     return {
         "bio": row["bio"], "coins": row["coins"] or 0, "bank": row["bank"] or 0,
         "xp": row["xp"] or 0, "level": row["level"] or 1,
         "inventory": json.loads(row["inventory"] or "[]"),
         "last_daily": row["last_daily"], "last_work": row["last_work"],
         "total_msgs": row["total_msgs"] or 0,
+        "premium": bool(row["premium"]) if "premium" in keys else False,
+        "premium_until": row["premium_until"] if "premium_until" in keys else None,
     }
 
 def _row_to_guild(row: sqlite3.Row) -> dict:
@@ -218,8 +232,15 @@ def get_user(user_id: int) -> dict:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (uid,)).fetchone()
         if row:
             return _row_to_user(row)
-        default = {"bio": None, "coins": 0, "bank": 0, "xp": 0, "level": 1, "inventory": [], "last_daily": None, "last_work": None, "total_msgs": 0}
-        conn.execute("INSERT INTO users (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs) VALUES (?, NULL, 0, 0, 0, 1, '[]', NULL, NULL, 0)", (uid,))
+        default = {
+            "bio": None, "coins": 0, "bank": 0, "xp": 0, "level": 1,
+            "inventory": [], "last_daily": None, "last_work": None,
+            "total_msgs": 0, "premium": False, "premium_until": None,
+        }
+        conn.execute(
+            "INSERT INTO users (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until) VALUES (?, NULL, 0, 0, 0, 1, '[]', NULL, NULL, 0, 0, NULL)",
+            (uid,)
+        )
         return default
 
 def save_user(user_id: int, data: dict):
@@ -227,9 +248,50 @@ def save_user(user_id: int, data: dict):
     with _db() as conn:
         conn.execute("""
             INSERT OR REPLACE INTO users
-            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (uid, data.get("bio"), data.get("coins", 0), data.get("bank", 0), data.get("xp", 0), data.get("level", 1), json.dumps(data.get("inventory", [])), data.get("last_daily"), data.get("last_work"), data.get("total_msgs", 0)))
+            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            uid, data.get("bio"), data.get("coins", 0), data.get("bank", 0),
+            data.get("xp", 0), data.get("level", 1), json.dumps(data.get("inventory", [])),
+            data.get("last_daily"), data.get("last_work"), data.get("total_msgs", 0),
+            1 if data.get("premium") else 0, data.get("premium_until"),
+        ))
+
+def is_premium(user_id: int) -> bool:
+    """Vérifie si l'utilisateur a le premium actif (et non expiré)."""
+    u = get_user(user_id)
+    if not u.get("premium"):
+        return False
+    until = u.get("premium_until")
+    if not until:
+        return True  # lifetime
+    try:
+        exp = datetime.fromisoformat(until)
+        if datetime.utcnow() > exp:
+            # Expiré → on désactive
+            u["premium"] = False
+            u["premium_until"] = None
+            save_user(user_id, u)
+            return False
+        return True
+    except Exception:
+        return bool(u.get("premium"))
+
+def set_premium(user_id: int, days: int | None = None):
+    """Active le premium. days=None = lifetime."""
+    u = get_user(user_id)
+    u["premium"] = True
+    if days is None:
+        u["premium_until"] = None
+    else:
+        u["premium_until"] = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    save_user(user_id, u)
+
+def remove_premium(user_id: int):
+    u = get_user(user_id)
+    u["premium"] = False
+    u["premium_until"] = None
+    save_user(user_id, u)
 
 def get_guild(guild_id: int) -> dict:
     gid = str(guild_id)
@@ -278,12 +340,14 @@ def add_warning(guild_id: int, user_id: int, reason: str, mod: str) -> int:
     with _db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM warnings WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id))).fetchone()[0]
         new_id = count + 1
-        conn.execute("INSERT INTO warnings (guild_id, user_id, reason, mod, date, warn_id) VALUES (?, ?, ?, ?, ?, ?)", (str(guild_id), str(user_id), reason, mod, datetime.now().strftime("%d/%m/%Y %H:%M"), new_id))
+        conn.execute("INSERT INTO warnings (guild_id, user_id, reason, mod, date, warn_id) VALUES (?, ?, ?, ?, ?, ?)",
+                     (str(guild_id), str(user_id), reason, mod, datetime.now().strftime("%d/%m/%Y %H:%M"), new_id))
         return new_id
 
 def get_warnings(guild_id: int, user_id: int) -> list:
     with _db() as conn:
-        rows = conn.execute("SELECT reason, mod, date, warn_id as id FROM warnings WHERE guild_id = ? AND user_id = ? ORDER BY id", (str(guild_id), str(user_id))).fetchall()
+        rows = conn.execute("SELECT reason, mod, date, warn_id as id FROM warnings WHERE guild_id = ? AND user_id = ? ORDER BY id",
+                            (str(guild_id), str(user_id))).fetchall()
         return [dict(r) for r in rows]
 
 def clear_warnings(guild_id: int, user_id: int):
@@ -297,7 +361,8 @@ def get_tickets(guild_id: int) -> dict:
 
 def save_ticket(guild_id: int, ticket_id: str, data: dict):
     with _db() as conn:
-        conn.execute("INSERT OR REPLACE INTO tickets (guild_id, ticket_id, channel_id, user_id, category, status) VALUES (?, ?, ?, ?, ?, ?)", (str(guild_id), str(ticket_id), data.get("channel_id"), data.get("user_id"), data.get("category"), data.get("status", "open")))
+        conn.execute("INSERT OR REPLACE INTO tickets (guild_id, ticket_id, channel_id, user_id, category, status) VALUES (?, ?, ?, ?, ?, ?)",
+                     (str(guild_id), str(ticket_id), data.get("channel_id"), data.get("user_id"), data.get("category"), data.get("status", "open")))
 
 def delete_ticket(guild_id: int, ticket_id: str):
     with _db() as conn:
@@ -305,12 +370,12 @@ def delete_ticket(guild_id: int, ticket_id: str):
 
 def get_leaderboard_economy(limit: int = 10) -> list:
     with _db() as conn:
-        rows = conn.execute("SELECT user_id, coins, bank, xp, level, total_msgs, bio, inventory, last_daily, last_work FROM users ORDER BY (coins + bank) DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute("SELECT user_id, coins, bank, xp, level, total_msgs, bio, inventory, last_daily, last_work, premium, premium_until FROM users ORDER BY (coins + bank) DESC LIMIT ?", (limit,)).fetchall()
         return [(r["user_id"], _row_to_user(r)) for r in rows]
 
 def get_leaderboard_xp(limit: int = 10) -> list:
     with _db() as conn:
-        rows = conn.execute("SELECT user_id, coins, bank, xp, level, total_msgs, bio, inventory, last_daily, last_work FROM users ORDER BY xp DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute("SELECT user_id, coins, bank, xp, level, total_msgs, bio, inventory, last_daily, last_work, premium, premium_until FROM users ORDER BY xp DESC LIMIT ?", (limit,)).fetchall()
         return [(r["user_id"], _row_to_user(r)) for r in rows]
 
 def raw() -> dict:
