@@ -1,12 +1,9 @@
 """
-╔══════════════════════════════════════╗
-║         KRYVOOX  — Bot SaaS           ║
-║  discord.py · Slash Commands · Groq   ║
-╚══════════════════════════════════════╝
+KRYVOOX — Bot SaaS
+discord.py · Slash Commands · Groq
 """
 
 import os
-import asyncio
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -42,6 +39,7 @@ class Kryvoox(commands.Bot):
             "cogs.stats",
             "cogs.levels",
             "cogs.premium",
+            "cogs.giveaways",
         ]
         for cog in cogs:
             try:
