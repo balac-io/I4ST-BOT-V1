@@ -34,18 +34,19 @@ def _db():
 def _init_tables(conn: sqlite3.Connection):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS users (
-        user_id       TEXT PRIMARY KEY,
-        bio           TEXT,
-        coins         INTEGER DEFAULT 0,
-        bank          INTEGER DEFAULT 0,
-        xp            INTEGER DEFAULT 0,
-        level         INTEGER DEFAULT 1,
-        inventory     TEXT DEFAULT '[]',
-        last_daily    TEXT,
-        last_work     TEXT,
-        total_msgs    INTEGER DEFAULT 0,
-        premium       INTEGER DEFAULT 0,
-        premium_until TEXT
+        user_id         TEXT PRIMARY KEY,
+        bio             TEXT,
+        coins           INTEGER DEFAULT 0,
+        bank            INTEGER DEFAULT 0,
+        xp              INTEGER DEFAULT 0,
+        level           INTEGER DEFAULT 1,
+        inventory       TEXT DEFAULT '[]',
+        last_daily      TEXT,
+        last_work       TEXT,
+        total_msgs      INTEGER DEFAULT 0,
+        premium         INTEGER DEFAULT 0,
+        premium_until   TEXT,
+        premium_reminded TEXT
     );
 
     CREATE TABLE IF NOT EXISTS guilds (
@@ -95,21 +96,12 @@ def _init_tables(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins + bank DESC);
     """)
 
-    for col, default in [
-        ("level_roles", "'{}'"),
-        ("welcome_image", "NULL"),
-        ("premium", "0"),
-        ("premium_until", "NULL"),
-    ]:
-        try:
-            conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT {default}" if col in ("premium_until",) else f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT {default}" if col == "premium" else f"ALTER TABLE guilds ADD COLUMN {col} TEXT DEFAULT {default}")
-        except sqlite3.OperationalError:
-            pass
-
-    # Ensure premium columns on users
     for col, sql in [
         ("premium", "ALTER TABLE users ADD COLUMN premium INTEGER DEFAULT 0"),
         ("premium_until", "ALTER TABLE users ADD COLUMN premium_until TEXT"),
+        ("premium_reminded", "ALTER TABLE users ADD COLUMN premium_reminded TEXT"),
+        ("level_roles", "ALTER TABLE guilds ADD COLUMN level_roles TEXT DEFAULT '{}'"),
+        ("welcome_image", "ALTER TABLE guilds ADD COLUMN welcome_image TEXT"),
     ]:
         try:
             conn.execute(sql)
@@ -130,13 +122,13 @@ def _migrate_from_json(conn: sqlite3.Connection):
     for uid, u in data.get("users", {}).items():
         conn.execute("""
             INSERT OR REPLACE INTO users
-            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until, premium_reminded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             str(uid), u.get("bio"), u.get("coins", 0), u.get("bank", 0),
             u.get("xp", 0), u.get("level", 1), json.dumps(u.get("inventory", [])),
             u.get("last_daily"), u.get("last_work"), u.get("total_msgs", 0),
-            1 if u.get("premium") else 0, u.get("premium_until"),
+            1 if u.get("premium") else 0, u.get("premium_until"), u.get("premium_reminded"),
         ))
 
     for gid, g in data.get("guilds", {}).items():
@@ -199,6 +191,7 @@ def _row_to_user(row: sqlite3.Row) -> dict:
         "total_msgs": row["total_msgs"] or 0,
         "premium": bool(row["premium"]) if "premium" in keys else False,
         "premium_until": row["premium_until"] if "premium_until" in keys else None,
+        "premium_reminded": row["premium_reminded"] if "premium_reminded" in keys else None,
     }
 
 def _row_to_guild(row: sqlite3.Row) -> dict:
@@ -235,10 +228,10 @@ def get_user(user_id: int) -> dict:
         default = {
             "bio": None, "coins": 0, "bank": 0, "xp": 0, "level": 1,
             "inventory": [], "last_daily": None, "last_work": None,
-            "total_msgs": 0, "premium": False, "premium_until": None,
+            "total_msgs": 0, "premium": False, "premium_until": None, "premium_reminded": None,
         }
         conn.execute(
-            "INSERT INTO users (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until) VALUES (?, NULL, 0, 0, 0, 1, '[]', NULL, NULL, 0, 0, NULL)",
+            "INSERT INTO users (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until, premium_reminded) VALUES (?, NULL, 0, 0, 0, 1, '[]', NULL, NULL, 0, 0, NULL, NULL)",
             (uid,)
         )
         return default
@@ -248,29 +241,28 @@ def save_user(user_id: int, data: dict):
     with _db() as conn:
         conn.execute("""
             INSERT OR REPLACE INTO users
-            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, bio, coins, bank, xp, level, inventory, last_daily, last_work, total_msgs, premium, premium_until, premium_reminded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             uid, data.get("bio"), data.get("coins", 0), data.get("bank", 0),
             data.get("xp", 0), data.get("level", 1), json.dumps(data.get("inventory", [])),
             data.get("last_daily"), data.get("last_work"), data.get("total_msgs", 0),
-            1 if data.get("premium") else 0, data.get("premium_until"),
+            1 if data.get("premium") else 0, data.get("premium_until"), data.get("premium_reminded"),
         ))
 
 def is_premium(user_id: int) -> bool:
-    """Vérifie si l'utilisateur a le premium actif (et non expiré)."""
     u = get_user(user_id)
     if not u.get("premium"):
         return False
     until = u.get("premium_until")
     if not until:
-        return True  # lifetime
+        return True
     try:
         exp = datetime.fromisoformat(until)
         if datetime.utcnow() > exp:
-            # Expiré → on désactive
             u["premium"] = False
             u["premium_until"] = None
+            u["premium_reminded"] = None
             save_user(user_id, u)
             return False
         return True
@@ -278,19 +270,94 @@ def is_premium(user_id: int) -> bool:
         return bool(u.get("premium"))
 
 def set_premium(user_id: int, days: int | None = None):
-    """Active le premium. days=None = lifetime."""
+    """Active le premium. days=None = lifetime. Remplace la date (pas d'empilement)."""
     u = get_user(user_id)
     u["premium"] = True
+    u["premium_reminded"] = None
     if days is None:
         u["premium_until"] = None
     else:
         u["premium_until"] = (datetime.utcnow() + timedelta(days=days)).isoformat()
     save_user(user_id, u)
 
+def renew_premium(user_id: int, days: int) -> datetime:
+    """
+    Renouvelle / prolonge le Premium.
+    - Si encore actif avec date : ajoute les jours à la date d'expiration actuelle.
+    - Si expiré ou inactif : part de maintenant.
+    - Lifetime (premium_until=None) : reste lifetime, ne change rien.
+    Retourne la nouvelle date d'expiration.
+    """
+    u = get_user(user_id)
+    now = datetime.utcnow()
+
+    # Lifetime
+    if u.get("premium") and not u.get("premium_until"):
+        return None  # reste à vie
+
+    base = now
+    if u.get("premium") and u.get("premium_until"):
+        try:
+            current_exp = datetime.fromisoformat(u["premium_until"])
+            if current_exp > now:
+                base = current_exp  # empile sur la date existante
+        except Exception:
+            pass
+
+    new_exp = base + timedelta(days=days)
+    u["premium"] = True
+    u["premium_until"] = new_exp.isoformat()
+    u["premium_reminded"] = None  # reset pour pouvoir re-notifier plus tard
+    save_user(user_id, u)
+    return new_exp
+
 def remove_premium(user_id: int):
     u = get_user(user_id)
     u["premium"] = False
     u["premium_until"] = None
+    u["premium_reminded"] = None
+    save_user(user_id, u)
+
+def get_expiring_premiums(within_days: int = 3) -> list:
+    """Retourne [(user_id, premium_until, days_left), ...] pour les premium qui expirent bientôt."""
+    now = datetime.utcnow()
+    limit = now + timedelta(days=within_days)
+    results = []
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, premium_until, premium_reminded FROM users WHERE premium = 1 AND premium_until IS NOT NULL"
+        ).fetchall()
+        for r in rows:
+            try:
+                exp = datetime.fromisoformat(r["premium_until"])
+                if now < exp <= limit:
+                    days_left = (exp - now).days
+                    results.append((r["user_id"], r["premium_until"], days_left, r["premium_reminded"]))
+            except Exception:
+                continue
+    return results
+
+def get_expired_premiums() -> list:
+    """Retourne les user_id dont le premium est marqué actif mais la date est passée."""
+    now = datetime.utcnow()
+    results = []
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, premium_until FROM users WHERE premium = 1 AND premium_until IS NOT NULL"
+        ).fetchall()
+        for r in rows:
+            try:
+                exp = datetime.fromisoformat(r["premium_until"])
+                if exp <= now:
+                    results.append(r["user_id"])
+            except Exception:
+                continue
+    return results
+
+def mark_premium_reminded(user_id: int, tag: str):
+    """tag = '3d' ou '1d' pour éviter les doubles rappels."""
+    u = get_user(user_id)
+    u["premium_reminded"] = tag
     save_user(user_id, u)
 
 def get_guild(guild_id: int) -> dict:
