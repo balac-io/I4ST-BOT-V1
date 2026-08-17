@@ -7,8 +7,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from utils import embeds as E, db
 from utils.rankcard import generate_rank_card
 
-# ─── Formules XP ──────────────────────────────────────────────
-
 def xp_for_level(level: int) -> int:
     return int(100 * (level ** 1.5))
 
@@ -32,13 +30,12 @@ def progress_in_level(xp: int, level: int) -> tuple[int, int]:
     current = max(0, xp - base)
     return current, needed
 
-# ─── Constantes ────────────────────────────────────────────────
-
 XP_PER_MSG = 5
 XP_COOLDOWN = 60
 XP_PER_VOICE_MIN = 2
 VOICE_CHECK_INTERVAL = 60
 LEVEL_REWARD_COINS = 50
+PREMIUM_XP_MULT = 1.20  # +20%
 
 _xp_cooldown: dict[int, float] = {}
 _voice_joined: dict[int, float] = {}
@@ -53,14 +50,11 @@ class Levels(commands.Cog):
         self.voice_xp_loop.cancel()
 
     def _get_rank(self, user_id: int) -> int:
-        """Retourne la position (1-based) dans le classement XP global."""
-        top = db.get_leaderboard_xp(1000)  # assez large pour la plupart des bots
+        top = db.get_leaderboard_xp(1000)
         for idx, (uid, _) in enumerate(top, start=1):
             if str(uid) == str(user_id):
                 return idx
         return 0
-
-    # ── Helper level-up ──────────────────────────────────────────
 
     async def _handle_level_up(self, member: discord.Member, old_level: int, new_level: int, channel: discord.abc.Messageable = None):
         u = db.get_user(member.id)
@@ -81,15 +75,11 @@ class Levels(commands.Cog):
             except Exception:
                 pass
 
-        desc = (
-            f"{member.mention} est passé au niveau **{new_level}** !\n"
-            f"🎁 Récompense : **+{reward} coins** 🪙"
-        )
+        desc = f"{member.mention} est passé au niveau **{new_level}** !\n🎁 Récompense : **+{reward} coins** 🪙"
         if role_given:
             desc += f"\n🎭 Rôle obtenu : {role_given.mention}"
 
         e = E.base("🎉 Level Up !", desc, discord.Color.gold())
-
         if channel:
             try:
                 await channel.send(embed=e, delete_after=15)
@@ -102,8 +92,6 @@ class Levels(commands.Cog):
                     await log_ch.send(embed=e)
                 except Exception:
                     pass
-
-    # ── /level  (Rank Card) ────────────────────────────────────
 
     @app_commands.command(name="level", description="Affiche ta rank card (ou celle d'un membre)")
     async def level_cmd(self, i: discord.Interaction, member: discord.Member = None):
@@ -129,7 +117,6 @@ class Levels(commands.Cog):
             file = discord.File(fp=buffer, filename=f"rank-{t.id}.png")
             await i.followup.send(file=file)
         except Exception as ex:
-            # Fallback texte si génération échoue
             pct = int((current / needed) * 20) if needed else 20
             bar = "█" * pct + "░" * (20 - pct)
             e = E.base(f"⭐ Niveau — {t.display_name}")
@@ -139,8 +126,6 @@ class Levels(commands.Cog):
             e.add_field(name="📈 Progrès", value=f"`{current}/{needed}` XP\n`[{bar}]`", inline=False)
             e.set_footer(text=f"Erreur rank card : {ex}")
             await i.followup.send(embed=e)
-
-    # ── /rank  (Leaderboard) ───────────────────────────────────
 
     @app_commands.command(name="rank", description="Classement XP du serveur")
     async def rank_cmd(self, i: discord.Interaction):
@@ -154,18 +139,16 @@ class Levels(commands.Cog):
             except Exception:
                 name = f"User#{str(uid)[:4]}"
             medal = medals[idx] if idx < 3 else f"`{idx+1}.`"
-            lines.append(f"{medal} **{name}** — Niveau `{data.get('level',1)}` · `{data.get('xp',0)}` XP")
+            star = " ⭐" if data.get("premium") else ""
+            lines.append(f"{medal} **{name}**{star} — Niveau `{data.get('level',1)}` · `{data.get('xp',0)}` XP")
         await i.response.send_message(
             embed=E.base("🏆 Classement XP", "\n".join(lines) or "Aucune donnée.", discord.Color.gold())
         )
-
-    # ── /profile ───────────────────────────────────────────────────
 
     @app_commands.command(name="profile", description="Voir le profil d'un membre")
     async def profile_cmd(self, i: discord.Interaction, member: discord.Member = None):
         t = member or i.user
         u = db.get_user(t.id)
-
         e = E.base(f"👤 Profil — {t.display_name}")
         e.set_thumbnail(url=t.display_avatar.url)
         if u.get("bio"):
@@ -176,9 +159,9 @@ class Levels(commands.Cog):
         e.add_field(name="💬 Messages", value=f"`{u.get('total_msgs', 0)}`")
         e.add_field(name="📅 A rejoint", value=f"<t:{int(t.joined_at.timestamp())}:R>")
         e.add_field(name="🎭 Rôle top", value=t.top_role.mention)
+        if db.is_premium(t.id):
+            e.set_footer(text="⭐ Premium")
         await i.response.send_message(embed=e)
-
-    # ── /bio ───────────────────────────────────────────────────────
 
     @app_commands.command(name="bio", description="Définit ta bio de profil")
     @app_commands.describe(text="Ta bio (max 200 caractères)")
@@ -191,8 +174,6 @@ class Levels(commands.Cog):
         db.save_user(i.user.id, u)
         await i.response.send_message(embed=E.success(f"Bio mise à jour :\n*{text}*"))
 
-    # ── /setlevelrole ─────────────────────────────────────────────
-
     @app_commands.command(name="setlevelrole", description="[Admin] Associe un rôle à un niveau")
     @app_commands.describe(level="Le niveau", role="Le rôle à donner")
     @app_commands.default_permissions(administrator=True)
@@ -202,9 +183,7 @@ class Levels(commands.Cog):
         level_roles[str(level)] = role.id
         cfg["level_roles"] = level_roles
         db.save_guild(i.guild.id, cfg)
-        await i.response.send_message(
-            embed=E.success(f"Au niveau **{level}**, le rôle {role.mention} sera donné automatiquement.")
-        )
+        await i.response.send_message(embed=E.success(f"Au niveau **{level}**, le rôle {role.mention} sera donné automatiquement."))
 
     @app_commands.command(name="removelevelrole", description="[Admin] Retire le rôle d'un niveau")
     @app_commands.default_permissions(administrator=True)
@@ -219,8 +198,6 @@ class Levels(commands.Cog):
         else:
             await i.response.send_message(embed=E.error(f"Aucun rôle configuré pour le niveau {level}."), ephemeral=True)
 
-    # ── XP Message ───────────────────────────────────────────────────
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -232,8 +209,12 @@ class Levels(commands.Cog):
             return
         _xp_cooldown[message.author.id] = now
 
+        xp_gain = XP_PER_MSG
+        if db.is_premium(message.author.id):
+            xp_gain = int(XP_PER_MSG * PREMIUM_XP_MULT)
+
         u = db.get_user(message.author.id)
-        u["xp"] = u.get("xp", 0) + XP_PER_MSG
+        u["xp"] = u.get("xp", 0) + xp_gain
         u["total_msgs"] = u.get("total_msgs", 0) + 1
 
         old_level = u.get("level", 1)
@@ -244,13 +225,10 @@ class Levels(commands.Cog):
         if new_level > old_level:
             await self._handle_level_up(message.author, old_level, new_level, message.channel)
 
-    # ── XP Vocal ─────────────────────────────────────────────────────
-
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         if member.bot:
             return
-
         if before.channel is None and after.channel is not None:
             _voice_joined[member.id] = time.time()
         elif before.channel is not None and after.channel is None:
@@ -265,6 +243,8 @@ class Levels(commands.Cog):
 
     async def _give_voice_xp(self, member: discord.Member, minutes: float):
         xp_gain = int(minutes * XP_PER_VOICE_MIN)
+        if db.is_premium(member.id):
+            xp_gain = int(xp_gain * PREMIUM_XP_MULT)
         if xp_gain <= 0:
             return
 
@@ -283,7 +263,6 @@ class Levels(commands.Cog):
     async def voice_xp_loop(self):
         now = time.time()
         to_update = []
-
         for guild in self.bot.guilds:
             for vc in guild.voice_channels:
                 for member in vc.members:
@@ -297,7 +276,6 @@ class Levels(commands.Cog):
                         minutes = elapsed / 60
                         to_update.append((member, minutes))
                         _voice_joined[member.id] = now
-
         for member, minutes in to_update:
             try:
                 await self._give_voice_xp(member, minutes)
