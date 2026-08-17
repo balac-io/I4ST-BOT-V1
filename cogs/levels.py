@@ -5,22 +5,20 @@ import time
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from utils import embeds as E, db
+from utils.rankcard import generate_rank_card
 
-# ─── Formules XP ──────────────────────────────────────────────────────────────
+# ─── Formules XP ──────────────────────────────────────────────
 
 def xp_for_level(level: int) -> int:
-    """XP nécessaire pour passer du niveau `level` au niveau suivant."""
     return int(100 * (level ** 1.5))
 
 def total_xp_for_level(level: int) -> int:
-    """XP total nécessaire pour atteindre exactement ce niveau."""
     total = 0
     for lvl in range(1, level):
         total += xp_for_level(lvl)
     return total
 
 def xp_to_level(xp: int) -> int:
-    """Calcule le niveau à partir de l'XP total."""
     level = 1
     remaining = xp
     while remaining >= xp_for_level(level):
@@ -29,23 +27,21 @@ def xp_to_level(xp: int) -> int:
     return level
 
 def progress_in_level(xp: int, level: int) -> tuple[int, int]:
-    """Retourne (xp actuel dans le niveau, xp nécessaire pour le suivant)."""
     needed = xp_for_level(level)
     base = total_xp_for_level(level)
     current = max(0, xp - base)
     return current, needed
 
-# ─── Constantes ───────────────────────────────────────────────────────────────
+# ─── Constantes ────────────────────────────────────────────────
 
-XP_PER_MSG     = 5
-XP_COOLDOWN    = 60          # secondes entre deux gains d'XP message
-XP_PER_VOICE_MIN = 2         # XP gagné par minute en vocal
-VOICE_CHECK_INTERVAL = 60    # vérifie toutes les 60 secondes
-
-LEVEL_REWARD_COINS = 50      # coins de base par level up (multiplié par le niveau)
+XP_PER_MSG = 5
+XP_COOLDOWN = 60
+XP_PER_VOICE_MIN = 2
+VOICE_CHECK_INTERVAL = 60
+LEVEL_REWARD_COINS = 50
 
 _xp_cooldown: dict[int, float] = {}
-_voice_joined: dict[int, float] = {}   # user_id → timestamp d'entrée en vocal
+_voice_joined: dict[int, float] = {}
 
 
 class Levels(commands.Cog):
@@ -56,20 +52,24 @@ class Levels(commands.Cog):
     def cog_unload(self):
         self.voice_xp_loop.cancel()
 
-    # ── Helper level-up ───────────────────────────────────────────────────────
+    def _get_rank(self, user_id: int) -> int:
+        """Retourne la position (1-based) dans le classement XP global."""
+        top = db.get_leaderboard_xp(1000)  # assez large pour la plupart des bots
+        for idx, (uid, _) in enumerate(top, start=1):
+            if str(uid) == str(user_id):
+                return idx
+        return 0
+
+    # ── Helper level-up ──────────────────────────────────────────
 
     async def _handle_level_up(self, member: discord.Member, old_level: int, new_level: int, channel: discord.abc.Messageable = None):
-        """Gère les récompenses et la notification de level up."""
         u = db.get_user(member.id)
-
-        # Récompense en coins
         reward = LEVEL_REWARD_COINS * new_level
         u["coins"] = u.get("coins", 0) + reward
         db.save_user(member.id, u)
 
-        # Rôle de récompense (si configuré dans le serveur)
         cfg = db.get_guild(member.guild.id)
-        level_roles = cfg.get("level_roles", {})  # {"5": role_id, "10": role_id, ...}
+        level_roles = cfg.get("level_roles", {})
         role_given = None
         for lvl_str, role_id in level_roles.items():
             try:
@@ -81,7 +81,6 @@ class Levels(commands.Cog):
             except Exception:
                 pass
 
-        # Notification
         desc = (
             f"{member.mention} est passé au niveau **{new_level}** !\n"
             f"🎁 Récompense : **+{reward} coins** 🪙"
@@ -97,7 +96,6 @@ class Levels(commands.Cog):
             except Exception:
                 pass
         else:
-            # Essaye le salon de logs ou le premier salon texte
             log_ch = member.guild.get_channel(cfg.get("log_channel") or 0)
             if log_ch:
                 try:
@@ -105,27 +103,44 @@ class Levels(commands.Cog):
                 except Exception:
                     pass
 
-    # ── /level ────────────────────────────────────────────────────────────────
+    # ── /level  (Rank Card) ────────────────────────────────────
 
-    @app_commands.command(name="level", description="Affiche ton niveau ou celui d'un membre")
+    @app_commands.command(name="level", description="Affiche ta rank card (ou celle d'un membre)")
     async def level_cmd(self, i: discord.Interaction, member: discord.Member = None):
+        await i.response.defer()
         t = member or i.user
         u = db.get_user(t.id)
-        xp    = u.get("xp", 0)
+        xp = u.get("xp", 0)
         level = u.get("level", 1)
-
         current, needed = progress_in_level(xp, level)
-        pct = int((current / needed) * 20) if needed else 20
-        bar = "█" * pct + "░" * (20 - pct)
+        rank = self._get_rank(t.id)
 
-        e = E.base(f"⭐ Niveau — {t.display_name}")
-        e.set_thumbnail(url=t.display_avatar.url)
-        e.add_field(name="🏆 Niveau",   value=f"`{level}`")
-        e.add_field(name="✨ XP total", value=f"`{xp}`")
-        e.add_field(name="📈 Progrès",  value=f"`{current}/{needed}` XP\n`[{bar}] {int(current/needed*100) if needed else 100}%`", inline=False)
-        await i.response.send_message(embed=e)
+        try:
+            buffer = await generate_rank_card(
+                username=t.display_name,
+                avatar_url=t.display_avatar.replace(size=256, format="png").url,
+                level=level,
+                xp=xp,
+                current_xp=current,
+                needed_xp=needed,
+                rank=rank,
+                total_msgs=u.get("total_msgs", 0),
+            )
+            file = discord.File(fp=buffer, filename=f"rank-{t.id}.png")
+            await i.followup.send(file=file)
+        except Exception as ex:
+            # Fallback texte si génération échoue
+            pct = int((current / needed) * 20) if needed else 20
+            bar = "█" * pct + "░" * (20 - pct)
+            e = E.base(f"⭐ Niveau — {t.display_name}")
+            e.set_thumbnail(url=t.display_avatar.url)
+            e.add_field(name="🏆 Niveau", value=f"`{level}`")
+            e.add_field(name="✨ XP total", value=f"`{xp}`")
+            e.add_field(name="📈 Progrès", value=f"`{current}/{needed}` XP\n`[{bar}]`", inline=False)
+            e.set_footer(text=f"Erreur rank card : {ex}")
+            await i.followup.send(embed=e)
 
-    # ── /rank ─────────────────────────────────────────────────────────────────
+    # ── /rank  (Leaderboard) ───────────────────────────────────
 
     @app_commands.command(name="rank", description="Classement XP du serveur")
     async def rank_cmd(self, i: discord.Interaction):
@@ -144,7 +159,7 @@ class Levels(commands.Cog):
             embed=E.base("🏆 Classement XP", "\n".join(lines) or "Aucune donnée.", discord.Color.gold())
         )
 
-    # ── /profile ──────────────────────────────────────────────────────────────
+    # ── /profile ───────────────────────────────────────────────────
 
     @app_commands.command(name="profile", description="Voir le profil d'un membre")
     async def profile_cmd(self, i: discord.Interaction, member: discord.Member = None):
@@ -155,15 +170,15 @@ class Levels(commands.Cog):
         e.set_thumbnail(url=t.display_avatar.url)
         if u.get("bio"):
             e.description = f"*{u['bio']}*"
-        e.add_field(name="🏆 Niveau",   value=f"`{u.get('level', 1)}`")
-        e.add_field(name="✨ XP",       value=f"`{u.get('xp', 0)}`")
-        e.add_field(name="💰 Coins",    value=f"`{u.get('coins', 0)}` 🪙")
+        e.add_field(name="🏆 Niveau", value=f"`{u.get('level', 1)}`")
+        e.add_field(name="✨ XP", value=f"`{u.get('xp', 0)}`")
+        e.add_field(name="💰 Coins", value=f"`{u.get('coins', 0)}` 🪙")
         e.add_field(name="💬 Messages", value=f"`{u.get('total_msgs', 0)}`")
         e.add_field(name="📅 A rejoint", value=f"<t:{int(t.joined_at.timestamp())}:R>")
         e.add_field(name="🎭 Rôle top", value=t.top_role.mention)
         await i.response.send_message(embed=e)
 
-    # ── /bio ──────────────────────────────────────────────────────────────────
+    # ── /bio ───────────────────────────────────────────────────────
 
     @app_commands.command(name="bio", description="Définit ta bio de profil")
     @app_commands.describe(text="Ta bio (max 200 caractères)")
@@ -176,7 +191,7 @@ class Levels(commands.Cog):
         db.save_user(i.user.id, u)
         await i.response.send_message(embed=E.success(f"Bio mise à jour :\n*{text}*"))
 
-    # ── /setlevelrole (admin) ─────────────────────────────────────────────────
+    # ── /setlevelrole ─────────────────────────────────────────────
 
     @app_commands.command(name="setlevelrole", description="[Admin] Associe un rôle à un niveau")
     @app_commands.describe(level="Le niveau", role="Le rôle à donner")
@@ -204,7 +219,7 @@ class Levels(commands.Cog):
         else:
             await i.response.send_message(embed=E.error(f"Aucun rôle configuré pour le niveau {level}."), ephemeral=True)
 
-    # ── XP par message ────────────────────────────────────────────────────────
+    # ── XP Message ───────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -229,26 +244,21 @@ class Levels(commands.Cog):
         if new_level > old_level:
             await self._handle_level_up(message.author, old_level, new_level, message.channel)
 
-    # ── XP Vocal ──────────────────────────────────────────────────────────────
+    # ── XP Vocal ─────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         if member.bot:
             return
 
-        # Entre dans un salon vocal
         if before.channel is None and after.channel is not None:
             _voice_joined[member.id] = time.time()
-
-        # Quitte un salon vocal
         elif before.channel is not None and after.channel is None:
             join_time = _voice_joined.pop(member.id, None)
             if join_time:
                 minutes = (time.time() - join_time) / 60
                 if minutes >= 1:
                     await self._give_voice_xp(member, minutes)
-
-        # Change de salon (on garde le timer)
         elif before.channel is not None and after.channel is not None:
             if member.id not in _voice_joined:
                 _voice_joined[member.id] = time.time()
@@ -271,7 +281,6 @@ class Levels(commands.Cog):
 
     @tasks.loop(seconds=VOICE_CHECK_INTERVAL)
     async def voice_xp_loop(self):
-        """Donne de l'XP périodiquement aux gens déjà en vocal (toutes les minutes)."""
         now = time.time()
         to_update = []
 
@@ -283,10 +292,8 @@ class Levels(commands.Cog):
                     if member.id not in _voice_joined:
                         _voice_joined[member.id] = now
                         continue
-
-                    # On donne l'XP pour la dernière minute et on reset le timer
                     elapsed = now - _voice_joined[member.id]
-                    if elapsed >= 55:  # ~1 minute
+                    if elapsed >= 55:
                         minutes = elapsed / 60
                         to_update.append((member, minutes))
                         _voice_joined[member.id] = now
