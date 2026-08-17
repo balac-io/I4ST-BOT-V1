@@ -7,20 +7,17 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import random
-import asyncio
+import re
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from utils import embeds as E
 
-# giveaway_id (message_id) -> data
 _active: dict[int, dict] = {}
 
 
 def _parse_duration(text: str) -> int | None:
-    """Parse 1h, 30m, 2d, 1d12h → secondes."""
     text = text.lower().strip()
     total = 0
-    import re
     parts = re.findall(r"(\d+)\s*([smhd])", text)
     if not parts:
         return None
@@ -50,12 +47,11 @@ class GiveawayView(discord.ui.View):
             gw["participants"].add(uid)
             await interaction.response.send_message("Tu participes au giveaway ! 🎉", ephemeral=True)
 
-        # Update embed count
         try:
             msg = await interaction.channel.fetch_message(self.giveaway_id)
             embed = msg.embeds[0] if msg.embeds else None
-            if embed:
-                embed.set_field_at(0, name="Participants", value=str(len(gw["participants"]),), inline=True)
+            if embed and len(embed.fields) > 0:
+                embed.set_field_at(0, name="Participants", value=str(len(gw["participants"])), inline=True)
                 await msg.edit(embed=embed, view=self)
         except Exception:
             pass
@@ -65,8 +61,6 @@ class Giveaways(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.check_loop.start()
-        # Re-register persistent views on restart is limited without DB;
-        # active giveaways are in-memory (survive until restart).
 
     def cog_unload(self):
         self.check_loop.cancel()
@@ -108,14 +102,11 @@ class Giveaways(commands.Cog):
             result = f"🏆 Gagnant(s) : {mentions}\n**Prix :** {gw['prize']}"
             color = discord.Color.green()
         else:
+            mentions = None
             result = "Personne n'a participé…"
             color = discord.Color.dark_grey()
 
-        e = discord.Embed(
-            title="🎉 Giveaway terminé",
-            description=result,
-            color=color
-        )
+        e = discord.Embed(title="🎉 Giveaway terminé", description=result, color=color)
         e.set_footer(text=f"{len(participants)} participant(s)")
 
         if msg:
@@ -123,13 +114,11 @@ class Giveaways(commands.Cog):
                 await msg.edit(embed=e, view=None)
             except Exception:
                 pass
-            await ch.send(content=mentions if winners else None, embed=e)
+            await ch.send(content=mentions, embed=e)
         else:
-            await ch.send(embed=e)
+            await ch.send(content=mentions, embed=e)
 
         gw["winner_ids"] = winners
-
-    # ── /giveaway ─────────────────────────────────────────────
 
     @app_commands.command(name="giveaway", description="Lance un giveaway")
     @app_commands.describe(
@@ -162,7 +151,6 @@ class Giveaways(commands.Cog):
         ends_at = datetime.utcnow() + timedelta(seconds=seconds)
 
         embed = self._build_embed(prize, winners, ends_at, i.user, 0)
-        # On envoie d'abord sans view pour avoir l'id, puis on édite
         await i.response.defer(ephemeral=True)
         msg = await ch.send(embed=embed)
 
@@ -183,8 +171,6 @@ class Giveaways(commands.Cog):
 
         await i.followup.send(embed=E.success(f"Giveaway lancé dans {ch.mention} !"), ephemeral=True)
 
-    # ── /gend ──────────────────────────────────────────────────
-
     @app_commands.command(name="gend", description="Termine un giveaway plus tôt")
     @app_commands.describe(message_id="ID du message du giveaway")
     @app_commands.default_permissions(manage_guild=True)
@@ -200,8 +186,6 @@ class Giveaways(commands.Cog):
         await i.response.defer(ephemeral=True)
         await self._end_giveaway(mid)
         await i.followup.send(embed=E.success("Giveaway terminé."), ephemeral=True)
-
-    # ── /greroll ─────────────────────────────────────────────
 
     @app_commands.command(name="greroll", description="Retire un nouveau gagnant pour un giveaway")
     @app_commands.describe(message_id="ID du message du giveaway")
@@ -230,7 +214,6 @@ class Giveaways(commands.Cog):
         new_winner = random.choice(pool)
         gw.setdefault("winner_ids", []).append(new_winner)
 
-        ch = self.bot.get_channel(gw["channel_id"])
         e = discord.Embed(
             title="🎉 Nouveau gagnant !",
             description=f"🏆 <@{new_winner}> gagne **{gw['prize']}**",
@@ -238,12 +221,10 @@ class Giveaways(commands.Cog):
         )
         await i.response.send_message(content=f"<@{new_winner}>", embed=e)
 
-    # ── Loop ──────────────────────────────────────────────────
-
     @tasks.loop(seconds=20)
     async def check_loop(self):
         now = datetime.utcnow()
-        to_end = [mid for mid, gw in _active.items() if not gw.get("ended") and gw["ends_at"] <= now]
+        to_end = [mid for mid, gw in list(_active.items()) if not gw.get("ended") and gw["ends_at"] <= now]
         for mid in to_end:
             try:
                 await self._end_giveaway(mid)
